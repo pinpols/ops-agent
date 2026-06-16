@@ -1,0 +1,6 @@
+# 阶段 1-2:裸 SDK + 结构化输出(先不上框架)
+anthropic>=0.40
+pydantic>=2.9
+python-dotenv>=1.0
+# 阶段 3 再装:langgraph>=0.2
+# 阶段 4 再装:langfuse>=2.50
