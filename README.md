@@ -12,7 +12,7 @@
 |---|---|---|---|
 | **1 基本功** ✅ | prompt + **结构化输出**(Pydantic 逼模型守 JSON 格式) | 日志 → 结构化诊断,**一次 LLM 调用,无工具** | anthropic + pydantic |
 | **2 单工具** ✅ | **一次 function calling**(LLM 决定调一个工具) | LLM 自己决定调 `query_pg` / `read_logs` 一次 | (同上) |
-| **3 多步 agent** | **多步规划 + 循环**(自己连着调几个工具到结论) | 真 agent | + langgraph |
+| **3 多步 agent** ✅(手写循环;3b 再 port LangGraph)| **多步规划 + 循环**(自己连着调几个工具到结论) | 真 agent | + langgraph |
 | **4 工程化** | **eval**(根因判对没)+ **trace/成本** | 测试集 + 可观测 | + langfuse |
 
 ## 起步(阶段 1)
@@ -27,6 +27,8 @@ cp .env.example .env          # 填入 ANTHROPIC_API_KEY
 python -m ops_agent.diagnose data/sample-console.log
 # 阶段 2:自然语言问题 → 模型自己调 read_logs 取数据 → 结论
 python -m ops_agent.investigate "console 最近有什么异常?"
+# 阶段 3:多步 agent(多工具+循环+记忆),交互式多轮
+python -m ops_agent.agent          # 多轮;或:python -m ops_agent.agent "sim 跑批为什么慢?"
 
 python -m unittest discover tests                       # 离线 mock 测试(无需 key)
 ```

@@ -2,5 +2,7 @@
 anthropic>=0.40
 pydantic>=2.9
 python-dotenv>=1.0
-# 阶段 3 再装:langgraph>=0.2
+# 阶段 3:query_pg 只读 SQL
+psycopg[binary]>=3.2
+# 阶段 3b 再装:langgraph>=0.2
 # 阶段 4 再装:langfuse>=2.50

@@ -36,5 +36,28 @@ class ReadLogsTest(unittest.TestCase):
         self.assertIn("未找到", tools.read_logs("nonexistent"))
 
 
+class QueryPgSafetyTest(unittest.TestCase):
+    """query_pg 护栏:字符串闸在连库前就拦下危险 SQL(不需真 DB)。"""
+
+    def setUp(self):
+        os.environ.pop("OPS_PG_DSN", None)  # 确保停在"未配 DSN"而非真连库
+
+    def test_rejects_non_select(self):
+        self.assertIn("只允许", tools.query_pg("update t set x=1"))
+
+    def test_rejects_multi_statement(self):
+        # 含 ; 先被多语句闸拦(在关键词闸之前)
+        self.assertIn("多语句", tools.query_pg("select 1; drop table t"))
+        self.assertIn("多语句", tools.query_pg("select 1; select 2"))
+
+    def test_rejects_forbidden_in_select(self):
+        # 以 with 开头但夹带 delete
+        self.assertIn("被禁", tools.query_pg("with x as (delete from t returning *) select * from x"))
+
+    def test_select_passes_guard_then_needs_dsn(self):
+        # 合法 SELECT 过了字符串闸 → 因没配 DSN 停下(证明 guard 放行了合法查询)
+        self.assertIn("OPS_PG_DSN", tools.query_pg("select count(*) from batch.job_instance"))
+
+
 if __name__ == "__main__":
     unittest.main()

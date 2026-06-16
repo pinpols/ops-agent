@@ -80,5 +80,80 @@ READ_LOGS_TOOL = {
     },
 }
 
+# ── query_pg:只读 SQL 查询(强工具 → 多层护栏)─────────────────────────────────
+# 黑名单(第一道、给清晰报错);真正承重的是连接级 default_transaction_read_only=on。
+_SQL_FORBIDDEN = re.compile(
+    r"\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|copy|"
+    r"merge|call|do|vacuum|reindex|comment|lock)\b",
+    re.IGNORECASE,
+)
+_QUERY_ROW_CAP = 200
+
+
+def query_pg(sql: str, max_rows: int = 50) -> str:
+    """对平台库执行**只读** SQL,返回行(截断)。需配 OPS_PG_DSN。
+
+    :param sql: 单条 SELECT/WITH 查询(禁多语句、禁任何写)
+    :param max_rows: 最多返回行数(上限 200)
+    """
+    s = (sql or "").strip().rstrip(";").strip()
+    if not s:
+        return "[query_pg] 空 SQL"
+    low = s.lower()
+    if not (low.startswith("select") or low.startswith("with")):
+        return "[query_pg] 只允许 SELECT / WITH 查询"
+    if ";" in s:
+        return "[query_pg] 禁止多语句(含 ;)"
+    if _SQL_FORBIDDEN.search(s):
+        return "[query_pg] 含被禁关键词(只读工具,不允许写/DDL)"
+
+    dsn = os.environ.get("OPS_PG_DSN")
+    if not dsn:
+        return "[query_pg] 未配 OPS_PG_DSN(如 postgresql://user:pass@localhost:5432/db),跳过"
+
+    try:
+        import psycopg
+    except ImportError:
+        return "[query_pg] 未装 psycopg:pip install 'psycopg[binary]'"
+
+    cap = min(max_rows, _QUERY_ROW_CAP)
+    try:
+        # 连接级只读 + 语句超时(最硬的护栏:就算字符串闸被绕,DB 也拒绝写/慢查询)
+        with psycopg.connect(
+            dsn, autocommit=True,
+            options="-c default_transaction_read_only=on -c statement_timeout=5000",
+        ) as conn, conn.cursor() as cur:
+            cur.execute(s)
+            cols = [d.name for d in cur.description] if cur.description else []
+            rows = cur.fetchmany(cap)
+    except Exception as e:  # noqa: BLE001 — 工具边界,任何 DB 错都转成给模型的文本
+        return f"[query_pg] 执行失败:{type(e).__name__}: {e}"
+
+    if not rows:
+        return f"[query_pg] 0 行。列:{cols}"
+    lines = [" | ".join(cols), "-" * 40]
+    lines += [" | ".join(str(v) for v in r) for r in rows]
+    more = f"\n(已截断,最多 {cap} 行)" if len(rows) == cap else ""
+    return "\n".join(lines) + more
+
+
+QUERY_PG_TOOL = {
+    "name": "query_pg",
+    "description": (
+        "对平台库执行只读 SQL 查那些日志看不到的运行态(如 pg_stat_activity 锁等待、"
+        "job/任务状态计数)。只允许单条 SELECT/WITH。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "sql": {"type": "string", "description": "单条只读 SELECT/WITH 查询"},
+            "max_rows": {"type": "integer", "description": "最多返回行数,默认 50,上限 200"},
+        },
+        "required": ["sql"],
+    },
+}
+
+
 # 工具名 → 实现 的派发表(执行 tool_use 时用)
-TOOL_IMPLS = {"read_logs": read_logs}
+TOOL_IMPLS = {"read_logs": read_logs, "query_pg": query_pg}
+
