@@ -15,6 +15,7 @@
 | **3 多步 agent** ✅(手写循环)| **多步规划 + 循环**(自己连着调几个工具到结论) | 真 agent | + langgraph |
 | **3b LangGraph** ✅(对照:框架替你做了啥)| port 手写循环→LangGraph(checkpointer 记忆/可续/HITL)| 同左 | + langgraph/langchain-anthropic |
 | **4 工程化** ✅ | **eval**(根因判对没)+ **trace/成本** | 测试集 + 可观测 | + langfuse |
+| **5 执行+HITL** ✅ | 危险动作工具 + **人工审批闸**(白名单/dry-run/批准才执行) | restart_service + approver | exec_tools |
 
 ## 起步(阶段 1)
 
@@ -35,6 +36,7 @@ python -m ops_agent.graph_agent
 # 阶段 4:eval(诊断判对没)+ 可选 Langfuse trace
 python -m evals.run_eval            # 确定性打分(需 key 跑诊断)
 python -m evals.run_eval --judge    # + LLM-as-judge
+python -m evals.run_eval --save base.json      # 存基线(改 prompt 后 --baseline base.json 对比升降)
 
 python -m unittest discover tests                       # 离线 mock 测试(无需 key)
 ```

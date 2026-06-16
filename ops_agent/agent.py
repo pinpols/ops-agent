@@ -9,22 +9,33 @@
 
 import os
 import sys
+from collections.abc import Callable
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
+from ops_agent.exec_tools import DANGEROUS_TOOLS, EXEC_TOOL_IMPLS, RESTART_TOOL
 from ops_agent.models import Diagnosis
 from ops_agent.obs import observe
 from ops_agent.tools import QUERY_PG_TOOL, READ_LOGS_TOOL, TOOL_IMPLS
 
 _SYSTEM_PROMPT = (
-    "你是资深 SRE。你有工具:read_logs(读服务日志)、query_pg(只读 SQL 查运行态)。"
-    "按需**多次**调用它们收集证据(日志看错误、SQL 看锁/积压等),证据够了再用 "
-    "report_diagnosis 提交结构化结论。规则:只依据真实取到的数据,不编造;"
-    "证据不足就在 root_cause 说明并给低 confidence;只读诊断,不建议危险操作。"
+    "你是资深 SRE。工具:read_logs(读日志)、query_pg(只读 SQL)、restart_service(重启服务,危险)。"
+    "先用只读工具按需多次取证,证据够了用 report_diagnosis 给结论。"
+    "只在确实定位到某服务卡死、且诊断已说明理由后,才考虑 restart_service(它会要人工审批)。"
+    "只依据真实取到的数据,不编造;证据不足给低 confidence。"
 )
+
+# 所有工具实现的派发表(只读 + 执行)
+_ALL_IMPLS = {**TOOL_IMPLS, **EXEC_TOOL_IMPLS}
+
+
+def _console_approver(tool_name: str, tool_input: dict) -> bool:
+    """默认审批闸:命令行问 y/N。可注入替换(测试 / 自动化)。"""
+    ans = input(f"\n⚠️  agent 要执行危险操作 {tool_name}({tool_input})。批准?[y/N] ").strip().lower()
+    return ans == "y"
 
 
 @observe
@@ -34,11 +45,17 @@ def run_agent(
     *,
     max_steps: int = 8,
     max_tokens: int = 1024,
+    approver: Callable[[str, dict], bool] | None = None,
 ) -> tuple[Diagnosis, list[dict]]:
-    """跑一轮多步诊断。返回 (结论, 更新后的 messages)。把 messages 传回即可多轮追问。"""
+    """跑一轮多步诊断。返回 (结论, 更新后的 messages)。把 messages 传回即可多轮追问。
+
+    approver:危险工具(DANGEROUS_TOOLS)执行前的审批闸,返回 True 才执行;
+    默认命令行 y/N。测试/自动化可注入。
+    """
     client = Anthropic()
     model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-    tools = [READ_LOGS_TOOL, QUERY_PG_TOOL, build_report_tool()]
+    approve = approver or _console_approver
+    tools = [READ_LOGS_TOOL, QUERY_PG_TOOL, RESTART_TOOL, build_report_tool()]
 
     messages: list[dict] = list(history or [])
     messages.append({"role": "user", "content": question})
@@ -64,8 +81,12 @@ def run_agent(
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "ok"})
                 messages.append({"role": "user", "content": results})
                 return Diagnosis.model_validate(tu.input), messages
-            impl = TOOL_IMPLS.get(tu.name)
-            output = impl(**tu.input) if impl else f"unknown tool {tu.name}"
+            # 危险工具:执行前过审批闸(HITL)
+            if tu.name in DANGEROUS_TOOLS and not approve(tu.name, tu.input):
+                output = f"[审批] 用户拒绝执行 {tu.name}({tu.input}),未执行。"
+            else:
+                impl = _ALL_IMPLS.get(tu.name)
+                output = impl(**tu.input) if impl else f"unknown tool {tu.name}"
             results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
 
