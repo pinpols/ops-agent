@@ -21,12 +21,14 @@
 cd ops-agent
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # 填入 API key
-python -m ops_agent.diagnose data/sample-console.log
+cp .env.example .env          # 填入 ANTHROPIC_API_KEY
+python -m ops_agent.diagnose data/sample-console.log   # 真跑(需 key)
+python -m unittest discover tests                       # 离线 mock 测试(无需 key)
 ```
 
-目标:`diagnose.py` 读一段日志 → 调一次 LLM → 按 `models.Diagnosis` 的 schema 返回结构化诊断。
-**核心逻辑(LLM 调用 + 结构化解析)留你自己写**(`diagnose.py` 里是 TODO 脚手架);写完跑通,卡住或想被 review 就贴出来。
+`diagnose.py` 已实现:读日志 → 用 Anthropic function calling 逼模型按 `models.Diagnosis`
+schema 返回 → Pydantic 校验成对象。**概念详解见 [`docs/phase1-concepts.md`](docs/phase1-concepts.md)**
+(function calling 怎么工作、为什么 Field description 影响输出)。
 
 ## 模型来源
 
@@ -36,9 +38,11 @@ python -m ops_agent.diagnose data/sample-console.log
 ## 目录
 
 ```
-src/ops_agent/
+ops_agent/
   models.py     # Pydantic 输出 schema(诊断结果的"目标形状")
-  diagnose.py   # 阶段 1:日志→结构化诊断(你来填核心)
+  diagnose.py   # 阶段 1:日志→结构化诊断(function calling + 结构化解析)
+docs/           # 概念笔记(phase1-concepts.md)
+tests/          # 离线 mock 测试
 data/           # 样本日志
-evals/          # 阶段 4:测试集 + 评测
+evals/          # 阶段 4:测试集 + 评测(待建)
 ```
