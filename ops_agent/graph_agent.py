@@ -43,6 +43,10 @@ def build_agent():
     """构建 LangGraph react agent:模型 + 工具 + 系统提示 + 结构化输出 + 记忆(checkpointer)。"""
     from langchain_anthropic import ChatAnthropic
     from langgraph.checkpoint.memory import MemorySaver
+
+    # 注:LangGraph V1.0 起 create_react_agent 已迁到 langchain.agents.create_agent
+    # (需装 langchain 元包)。当前依赖下 langgraph.prebuilt 仍可用,故沿用;
+    # 升级 langchain 后可平滑切到 create_agent(签名兼容 model/tools/prompt/response_format)。
     from langgraph.prebuilt import create_react_agent
 
     model = ChatAnthropic(

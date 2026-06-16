@@ -7,4 +7,5 @@ psycopg[binary]>=3.2
 # 阶段 3b:LangGraph 版 agent
 langgraph>=0.2
 langchain-anthropic>=0.3
-# 阶段 4 再装:langfuse>=2.50
+# 阶段 4(可选 trace):langfuse —— 不装则 obs 自动 no-op
+# langfuse>=3.0

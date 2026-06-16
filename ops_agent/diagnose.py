@@ -16,6 +16,7 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 
 from ops_agent.models import Diagnosis
+from ops_agent.obs import observe
 
 # 工具名:模型不会真执行它,只是按它的 input_schema 把"诊断结论"作为参数填好返回。
 _TOOL_NAME = "report_diagnosis"
@@ -44,6 +45,7 @@ def _build_tool() -> dict:
     }
 
 
+@observe
 def diagnose_log(log_text: str) -> Diagnosis:
     """把一段日志交给 LLM,返回结构化的 Diagnosis。"""
     client = Anthropic()  # 自动读环境变量 ANTHROPIC_API_KEY

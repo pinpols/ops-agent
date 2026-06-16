@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
 from ops_agent.models import Diagnosis
+from ops_agent.obs import observe
 from ops_agent.tools import QUERY_PG_TOOL, READ_LOGS_TOOL, TOOL_IMPLS
 
 _SYSTEM_PROMPT = (
@@ -26,6 +27,7 @@ _SYSTEM_PROMPT = (
 )
 
 
+@observe
 def run_agent(
     question: str,
     history: list[dict] | None = None,
