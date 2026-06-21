@@ -3,6 +3,8 @@
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from ops_agent import tools
 
@@ -124,6 +126,45 @@ class QueryPgSafetyTest(unittest.TestCase):
         self.assertIn("必须大于 0", tools.query_pg("select 1", max_rows=0))
         self.assertIn("必须是正整数", tools.query_pg("select 1", max_rows=True))
         self.assertIn("OPS_PG_DSN", tools.query_pg("select 1", max_rows="2"))
+
+
+class QueryPgConnectionGuardTest(unittest.TestCase):
+    """连接级护栏 + 危险读函数黑名单(此前零直接覆盖)。"""
+
+    def setUp(self):
+        os.environ.pop("OPS_PROFILE", None)
+        os.environ["OPS_SQL_ALLOW_FREE"] = "true"
+
+    def tearDown(self):
+        os.environ.pop("OPS_SQL_ALLOW_FREE", None)
+        os.environ.pop("OPS_PG_DSN", None)
+
+    def test_blacklist_rejects_dangerous_read_functions(self):
+        # 字符串闸在连库前就拦下文件读 / 大对象 / 拖垮类函数
+        for sql in (
+            "select pg_read_file('/etc/passwd')",
+            "select pg_ls_dir('/')",
+            "select lo_import('/etc/passwd')",
+            "select pg_sleep(100)",
+        ):
+            out = tools.query_pg(sql)
+            self.assertIn("不允许", out, sql)
+
+    @patch("psycopg.connect")
+    def test_connection_uses_readonly_and_timeout(self, connect):
+        os.environ["OPS_PG_DSN"] = "postgresql://reader:pw@localhost:5432/db"
+        cur = MagicMock()
+        cur.description = [SimpleNamespace(name="n")]
+        cur.fetchmany.return_value = [(1,)]
+        connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value = cur
+
+        result = tools.query_pg_result("select 1")
+
+        self.assertTrue(result.ok)
+        opts = connect.call_args.kwargs["options"]
+        self.assertIn("default_transaction_read_only=on", opts)
+        self.assertIn("statement_timeout=5000", opts)
+        self.assertTrue(connect.call_args.kwargs["autocommit"])
 
 
 if __name__ == "__main__":

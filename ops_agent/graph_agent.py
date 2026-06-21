@@ -17,6 +17,7 @@ from langchain_core.tools import tool
 
 from ops_agent.config import get_settings
 from ops_agent.models import Diagnosis
+from ops_agent.redaction import redact_text
 from ops_agent.system_tools import (
     inspect_compose as _inspect_compose,
 )
@@ -41,6 +42,11 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _safe(text: str) -> str:
+    """工具结果喂回 LLM(出网)前脱敏,与手写 agent 同一道防线,防配置/SQL/日志里的明文凭据外泄。"""
+    return redact_text(text) if get_settings().ops_redact_artifacts else text
+
+
 # LangChain 工具 = 给我们已有的纯函数套一层(docstring 会作为 description 发给模型,和裸 SDK 一样)
 @tool
 def list_services() -> str:
@@ -51,37 +57,37 @@ def list_services() -> str:
 @tool
 def tail_recent_errors(max_lines: int = 200) -> str:
     """扫描目标日志目录最近 WARN/ERROR/Exception/timeout 等关键行。"""
-    return _tail_recent_errors(max_lines)
+    return _safe(_tail_recent_errors(max_lines))
 
 
 @tool
 def inspect_compose(max_chars: int = 6000) -> str:
     """读取目标系统 docker-compose 摘要,识别 PG/Kafka/Redis/Valkey 和服务端口。"""
-    return _inspect_compose(max_chars)
+    return _safe(_inspect_compose(max_chars))
 
 
 @tool
 def read_app_config(service: str | None = None, max_chars: int = 6000) -> str:
     """读取 Spring application 配置摘要,可指定服务名如 worker-import/orchestrator。"""
-    return _read_app_config(service, max_chars)
+    return _safe(_read_app_config(service, max_chars))
 
 
 @tool
 def read_logs(service: str, pattern: str | None = None, max_lines: int = 200) -> str:
     """读取指定服务日志做排查。先取数据再下结论;pattern 是可选正则,过滤关键行。"""
-    return _read_logs(service, pattern, max_lines)
+    return _safe(_read_logs(service, pattern, max_lines))
 
 
 @tool
 def query_pg_template(template: str, max_rows: int = 50) -> str:
     """执行预先批准的只读 SQL 模板。生产 profile 必须优先用它。"""
-    return _query_pg_template(template, max_rows)
+    return _safe(_query_pg_template(template, max_rows))
 
 
 @tool
 def query_pg(sql: str, max_rows: int = 50) -> str:
     """对平台库执行只读 SQL(单条 SELECT/WITH)查日志看不到的运行态,如 pg_stat_activity、状态计数。"""
-    return _query_pg(sql, max_rows)
+    return _safe(_query_pg(sql, max_rows))
 
 
 def build_agent():
@@ -118,7 +124,11 @@ def run(agent, question: str, thread_id: str = "default") -> Diagnosis:
         {"messages": [("user", question)]},
         config={"configurable": {"thread_id": thread_id}},
     )
-    return result["structured_response"]
+    structured = result.get("structured_response")
+    if structured is None:
+        # 模型绕圈到 recursion_limit 仍没产出结构化结论时,langgraph 可能不返回该键。
+        raise RuntimeError("LangGraph agent 未产出结构化诊断(可能绕圈到达步数上限)")
+    return structured
 
 
 def main() -> None:
