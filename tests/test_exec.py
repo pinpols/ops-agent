@@ -35,6 +35,8 @@ class ExecToolGuardTest(unittest.TestCase):
         os.environ.pop("OPS_ALLOW_EXEC", None)
         os.environ.pop("OPS_RESTART_CMD", None)
         os.environ.pop("OPS_EXEC_ALLOWLIST", None)
+        os.environ.pop("OPS_PROFILE", None)
+        os.environ.pop("OPS_PROD_ALLOW_EXEC", None)
 
     def test_rejects_non_whitelisted_service(self):
         self.assertIn("不在白名单", exec_tools.restart_service("rm-rf"))
@@ -75,6 +77,34 @@ class ExecToolGuardTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("OPS_EXEC_ALLOWLIST", result.to_text())
         run.assert_not_called()
+
+    @patch("ops_agent.exec_tools.subprocess.run")
+    def test_prod_blocks_exec_without_prod_flag(self, run):
+        # prod 下即便 OPS_ALLOW_EXEC=true + 配齐 allowlist/cmd,缺 OPS_PROD_ALLOW_EXEC 仍硬拒
+        os.environ["OPS_PROFILE"] = "prod"
+        os.environ["OPS_ALLOW_EXEC"] = "true"
+        os.environ["OPS_RESTART_CMD"] = "echo {service}"
+        os.environ["OPS_EXEC_ALLOWLIST"] = "echo"
+
+        result = exec_tools.restart_service_result("orchestrator")
+
+        self.assertFalse(result.ok)
+        self.assertIn("OPS_PROD_ALLOW_EXEC", result.to_text())
+        run.assert_not_called()  # 连命令都没跑
+
+    @patch("ops_agent.exec_tools.subprocess.run")
+    def test_prod_allows_exec_with_prod_flag(self, run):
+        os.environ["OPS_PROFILE"] = "prod"
+        os.environ["OPS_ALLOW_EXEC"] = "true"
+        os.environ["OPS_PROD_ALLOW_EXEC"] = "true"
+        os.environ["OPS_RESTART_CMD"] = "echo {service}"
+        os.environ["OPS_EXEC_ALLOWLIST"] = "echo"
+        run.return_value = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        result = exec_tools.restart_service_result("orchestrator")
+
+        self.assertTrue(result.ok)  # 显式双开关后才真跑
+        run.assert_called_once()
 
 
 class HitlApprovalTest(unittest.TestCase):
@@ -121,6 +151,26 @@ class HitlApprovalTest(unittest.TestCase):
         d, messages = agent.run_agent("重启 orchestrator", approver=lambda *a: True)
         self.assertIsInstance(d, Diagnosis)
         self.assertIn("DRY-RUN", str(messages))  # 批准 → 执行(默认 dry-run)
+
+    @patch("ops_agent.agent.Anthropic")
+    def test_approve_writes_execution_audit_record(self, anthropic_cls):
+        # 批准并执行后,审计里除 approval 还应有 execution 记录(批准后到底跑没跑成)
+        anthropic_cls.return_value.messages.create.side_effect = self._two_step()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["OPS_APPROVAL_LOG"] = str(Path(tmp) / "approvals.jsonl")
+            agent.run_agent("重启 orchestrator", approver=lambda *a: True)
+            records = [
+                json.loads(line)
+                for line in Path(os.environ["OPS_APPROVAL_LOG"])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+        types = [r["type"] for r in records]
+        self.assertIn("approval", types)
+        self.assertIn("execution", types)
+        exec_rec = next(r for r in records if r["type"] == "execution")
+        self.assertEqual(exec_rec["tool_name"], "restart_service")
+        self.assertTrue(exec_rec["dry_run"])  # 默认 dry-run
 
 
 if __name__ == "__main__":

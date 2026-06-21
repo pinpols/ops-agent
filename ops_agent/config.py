@@ -1,7 +1,7 @@
 """Centralized runtime configuration for ops-agent."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
@@ -34,7 +34,7 @@ def _env_csv(name: str) -> tuple[str, ...]:
 @dataclass(frozen=True)
 class Settings:
     ops_profile: str
-    anthropic_api_key: str | None
+    anthropic_api_key: str | None = field(repr=False)  # 防 key 误入 repr/异常栈/日志
     anthropic_model: str
     anthropic_judge_model: str
     ops_target_root: Path | None
@@ -44,6 +44,7 @@ class Settings:
     ops_pg_dsn: str | None
     ops_sql_allow_free: bool
     ops_allow_exec: bool
+    ops_prod_allow_exec: bool
     ops_restart_cmd: str | None
     ops_exec_allowlist: tuple[str, ...]
     ops_approval_log: Path
@@ -91,6 +92,7 @@ class Settings:
             ops_pg_dsn=os.environ.get("OPS_PG_DSN"),
             ops_sql_allow_free=_env_bool("OPS_SQL_ALLOW_FREE", default=profile != "prod"),
             ops_allow_exec=_env_bool("OPS_ALLOW_EXEC"),
+            ops_prod_allow_exec=_env_bool("OPS_PROD_ALLOW_EXEC"),
             ops_restart_cmd=os.environ.get("OPS_RESTART_CMD"),
             ops_exec_allowlist=_env_csv("OPS_EXEC_ALLOWLIST"),
             ops_approval_log=Path(

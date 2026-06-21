@@ -46,6 +46,15 @@ def restart_service_result(service: str) -> ToolResult:
             dry_run=True,
         )
 
+    # 生产 fail-closed:即便 OPS_ALLOW_EXEC=true(可能从 dev .env / CI 泄漏继承),
+    # prod profile 下仍必须显式 OPS_PROD_ALLOW_EXEC=true 才真执行,否则硬拒(不退化为 dry-run)。
+    if settings.production and not settings.ops_prod_allow_exec:
+        return ToolResult.failure(
+            f"[restart_service] 拒绝:生产 profile 下执行需显式 OPS_PROD_ALLOW_EXEC=true "
+            f"(OPS_ALLOW_EXEC 单独不足以在 prod 放行 {service})",
+            service=service,
+        )
+
     cmd_tpl = settings.ops_restart_cmd
     if not cmd_tpl:
         return ToolResult.failure(

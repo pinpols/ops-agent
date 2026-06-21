@@ -142,9 +142,14 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     log_dir_writable = (
         os.access(settings.ops_log_dir, os.W_OK) if settings.ops_log_dir.exists() else False
     )
+    # exec 安全:要么彻底关(allow_exec=false),要么在 prod 下显式开且配了 allowlist。
+    # 旧逻辑把"allowlist 非空"当 prod-ready 条件是反的(allowlist 非空≈允许执行)。
+    exec_safe = (not settings.ops_allow_exec) or (
+        settings.ops_prod_allow_exec and bool(settings.ops_exec_allowlist)
+    )
     prod_ready = not settings.production or (
         not settings.ops_sql_allow_free
-        and bool(settings.ops_exec_allowlist)
+        and exec_safe
         and db_user_minimal
         and settings.ops_log_dir.exists()
         and not log_dir_writable
@@ -167,6 +172,8 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         "OPS_PG_USER_MINIMAL_OK": db_user_minimal,
         "OPS_SQL_ALLOW_FREE": settings.ops_sql_allow_free,
         "OPS_ALLOW_EXEC": settings.ops_allow_exec,
+        "OPS_PROD_ALLOW_EXEC": settings.ops_prod_allow_exec,
+        "EXEC_SAFE": exec_safe,
         "OPS_RESTART_CMD": bool(settings.ops_restart_cmd),
         "OPS_EXEC_ALLOWLIST": settings.ops_exec_allowlist,
         "OPS_APPROVAL_LOG": settings.ops_approval_log,

@@ -16,7 +16,7 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
-from ops_agent.audit import append_approval_record
+from ops_agent.audit import append_approval_record, append_execution_record
 from ops_agent.config import get_settings
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
@@ -179,6 +179,15 @@ def run_agent(
                             f"[{tu.name}] 工具异常:{type(e).__name__}: {e}",
                             error_type="tool_exception",
                         )
+            # 危险动作批准后留执行结果痕(成败 / dry-run),补"只记批没批"的审计盲区
+            if tu.name in DANGEROUS_TOOLS and approved:
+                append_execution_record(
+                    settings.ops_approval_log,
+                    tool_name=tu.name,
+                    ok=result.ok,
+                    dry_run=bool(result.metadata.get("dry_run", False)),
+                    detail=result.error,
+                )
             # 工具输出在喂回 LLM(出网到 Anthropic)+ 落 trace 前统一脱敏,
             # 防 Spring 配置 / SQL 结果 / 日志里的明文凭据外泄。
             output = result.to_text()
