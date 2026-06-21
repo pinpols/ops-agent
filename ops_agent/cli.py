@@ -246,7 +246,22 @@ def main(argv: list[str] | None = None) -> None:
     load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        print("\n已中断。", file=sys.stderr)
+        raise SystemExit(130) from None
+    except Exception as e:  # noqa: BLE001 - CLI 顶层兜底:把 LLM/网络等错误转成干净提示,不抛裸堆栈
+        from anthropic import APIConnectionError, APIError
+
+        if isinstance(e, (APIError, APIConnectionError)):
+            print(
+                f"LLM 调用失败({type(e).__name__}):{e}\n稍后重试,或检查 ANTHROPIC_API_KEY / 网络。",
+                file=sys.stderr,
+            )
+        else:
+            print(f"执行出错({type(e).__name__}):{e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

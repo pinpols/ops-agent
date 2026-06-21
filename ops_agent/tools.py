@@ -156,7 +156,10 @@ READ_LOGS_TOOL = {
 # 黑名单(第一道、给清晰报错);真正承重的是连接级 default_transaction_read_only=on。
 _SQL_FORBIDDEN = re.compile(
     r"\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|copy|"
-    r"merge|call|do|vacuum|reindex|comment)\b",
+    r"merge|call|do|vacuum|reindex|comment|"
+    # 危险"读"函数:文件读写 / 大对象 / dblink / 拖垮(纵深防御;真正承重仍是最小权限只读用户)
+    r"pg_read_file|pg_read_binary_file|pg_ls_dir|pg_stat_file|lo_import|lo_export|"
+    r"dblink|pg_sleep)\b",
     re.IGNORECASE,
 )
 
