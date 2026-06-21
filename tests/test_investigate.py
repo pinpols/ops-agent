@@ -61,7 +61,9 @@ class InvestigateTest(unittest.TestCase):
         fed_back = any(
             isinstance(m.get("content"), list)
             and any(
-                isinstance(b, dict) and b.get("type") == "tool_result" and "read_logs" in str(b.get("content", ""))
+                isinstance(b, dict)
+                and b.get("type") == "tool_result"
+                and "read_logs" in str(b.get("content", ""))
                 for b in m["content"]
             )
             for m in second_call_messages

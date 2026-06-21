@@ -14,7 +14,8 @@ class Case:
     id: str
     log_text: str
     expected_severity: Severity
-    expected_keywords: list[str] = field(default_factory=list)  # 应出现在 root_cause/summary/evidence
+    # 应出现在 root_cause/summary/evidence
+    expected_keywords: list[str] = field(default_factory=list)
     is_normal: bool = False  # 反例:正常日志,不许报 CRITICAL
 
 
@@ -53,5 +54,113 @@ CASES: list[Case] = [
         ),
         expected_severity=Severity.INFO,
         is_normal=True,
+    ),
+    Case(
+        id="db_pool_exhausted",
+        log_text=(
+            "2026-06-15T09:21:14.002+08:00 ERROR [worker-import-17] "
+            "com.zaxxer.hikari.pool.HikariPool - HikariPool-1 - Connection is not available, "
+            "request timed out after 30000ms.\n"
+            "2026-06-15T09:21:14.004+08:00 WARN [worker-import-17] "
+            "o.s.jdbc.CannotGetJdbcConnectionException - Failed to obtain JDBC Connection"
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["hikari", "connection", "timeout"],
+    ),
+    Case(
+        id="pg_lock_wait",
+        log_text=(
+            "2026-06-15T10:03:44.120+08:00 WARN [orchestrator-3] "
+            "job_instance update blocked for 62000ms waiting for ShareLock on relation "
+            "batch.job_instance\n"
+            "2026-06-15T10:03:44.122+08:00 WARN [orchestrator-3] "
+            "pg_stat_activity wait_event_type=Lock wait_event=transactionid"
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["lock", "job_instance"],
+    ),
+    Case(
+        id="worker_queue_backlog",
+        log_text=(
+            "2026-06-15T11:40:01.550+08:00 WARN [scheduler] "
+            "worker-import backlog=1842 oldest_task_age=47m active_workers=2\n"
+            "2026-06-15T11:40:02.007+08:00 WARN [scheduler] "
+            "dispatch lag above threshold for queue worker-import"
+        ),
+        expected_severity=Severity.WARNING,
+        expected_keywords=["backlog", "worker-import"],
+    ),
+    Case(
+        id="external_api_timeout",
+        log_text=(
+            "2026-06-15T12:18:31.902+08:00 ERROR [worker-export-4] "
+            "PaymentGatewayClient - POST https://payments.example.test/export timed out "
+            "after 10000ms\n"
+            "2026-06-15T12:18:31.904+08:00 WARN [worker-export-4] "
+            "retrying payment export request attempt=3"
+        ),
+        expected_severity=Severity.WARNING,
+        expected_keywords=["payment", "timeout"],
+    ),
+    Case(
+        id="disk_full",
+        log_text=(
+            "2026-06-15T13:02:09.711+08:00 ERROR [worker-process-9] "
+            "java.io.IOException: No space left on device while writing "
+            "/var/lib/batch/tmp/chunk-00042\n"
+            "2026-06-15T13:02:09.713+08:00 ERROR [worker-process-9] "
+            "failed to persist batch artifact, free_disk_bytes=0"
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["disk", "no space"],
+    ),
+    Case(
+        id="healthy_heartbeat",
+        log_text=(
+            "2026-06-15T14:00:00.000+08:00 INFO [healthcheck] "
+            "orchestrator heartbeat ok active_jobs=3 queued_jobs=0\n"
+            "2026-06-15T14:00:05.000+08:00 INFO [healthcheck] "
+            "worker-import heartbeat ok processed_last_minute=42"
+        ),
+        expected_severity=Severity.INFO,
+        is_normal=True,
+    ),
+    Case(
+        id="real_import_json_shape_mismatch",
+        log_text=(
+            "2026-06-17T18:41:36.335+08:00 WARN  [worker-task-exec-1] "
+            "c.e.b.w.i.i.q.ValidationConfigSupport - catch:Exception: "
+            "MismatchedInputException: Cannot deserialize value of type "
+            "`java.util.LinkedHashMap<java.lang.String,java.lang.Object>` from Array value "
+            "(token `JsonToken.START_ARRAY`)\n"
+            "2026-06-17T18:41:36.572+08:00 WARN  [worker-task-exec-3] "
+            "ValidationConfigSupport - catch:Exception: MismatchedInputException"
+        ),
+        expected_severity=Severity.WARNING,
+        expected_keywords=["mismatchedinputexception", "array"],
+    ),
+    Case(
+        id="real_import_missing_table",
+        log_text=(
+            "2026-06-17T18:47:22.560+08:00 ERROR [worker-task-exec-1] "
+            "c.e.batch.worker.imports.stage.LoadStep - load stage (streaming) failed: "
+            "tenantId=ta, fileId=5400, message=PreparedStatementCallback; bad SQL grammar\n"
+            "Caused by: org.postgresql.util.PSQLException: ERROR: relation "
+            '"biz.missing_customer_account" does not exist'
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["missing_customer_account", "relation"],
+    ),
+    Case(
+        id="real_partition_replace_copy_config",
+        log_text=(
+            "2026-06-17T18:47:28.385+08:00 ERROR [worker-task-exec-3] "
+            "c.e.batch.worker.imports.stage.LoadStep - load stage (streaming) failed: "
+            "message=PARTITION_REPLACE_COPY cannot run with partitionCount=2: each worker "
+            "partition would clear the same target partition before COPY, which can leave "
+            "partial data. Use shard_strategy=NONE for this template."
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["partition_replace_copy", "partitioncount"],
     ),
 ]

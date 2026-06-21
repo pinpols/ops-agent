@@ -19,14 +19,19 @@ def _resp(*blocks):
 
 
 _REPORT = {
-    "severity": "WARNING", "summary": "x", "root_cause": "x",
-    "evidence": [], "suggested_action": "x", "confidence": 0.5,
+    "severity": "WARNING",
+    "summary": "x",
+    "root_cause": "x",
+    "evidence": [],
+    "suggested_action": "x",
+    "confidence": 0.5,
 }
 
 
 class ExecToolGuardTest(unittest.TestCase):
     def setUp(self):
         os.environ.pop("OPS_ALLOW_EXEC", None)
+        os.environ.pop("OPS_RESTART_CMD", None)
 
     def test_rejects_non_whitelisted_service(self):
         self.assertIn("不在白名单", exec_tools.restart_service("rm-rf"))
@@ -36,11 +41,32 @@ class ExecToolGuardTest(unittest.TestCase):
         self.assertIn("DRY-RUN", out)
         self.assertIn("未真执行", out)
 
+    def test_restart_service_result_is_structured(self):
+        result = exec_tools.restart_service_result("orchestrator")
+        self.assertTrue(result.ok)
+        self.assertIn("DRY-RUN", result.to_text())
+        self.assertTrue(result.metadata["dry_run"])
+
+    @patch("ops_agent.exec_tools.subprocess.run")
+    def test_real_exec_uses_argv_not_shell(self, run):
+        os.environ["OPS_ALLOW_EXEC"] = "true"
+        os.environ["OPS_RESTART_CMD"] = "echo {service}"
+        run.return_value = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        result = exec_tools.restart_service_result("orchestrator")
+
+        self.assertTrue(result.ok)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["echo", "orchestrator"])
+        self.assertNotIn("shell", run.call_args.kwargs)
+        self.assertEqual(result.metadata["command_args"], ["echo", "orchestrator"])
+
 
 class HitlApprovalTest(unittest.TestCase):
     def setUp(self):
         os.environ["OPS_LOG_DIR"] = str(Path(__file__).resolve().parent.parent / "data")
         os.environ.pop("OPS_ALLOW_EXEC", None)
+        os.environ.pop("OPS_RESTART_CMD", None)
 
     def _two_step(self):
         # 步1:模型要重启;步2:给结论

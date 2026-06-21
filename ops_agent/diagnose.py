@@ -9,12 +9,13 @@
 运行:  python -m ops_agent.diagnose data/sample-console.log
 """
 
-import os
 import sys
+from pathlib import Path
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
+from ops_agent.config import get_settings
 from ops_agent.models import Diagnosis
 from ops_agent.obs import observe
 
@@ -49,7 +50,7 @@ def _build_tool() -> dict:
 def diagnose_log(log_text: str) -> Diagnosis:
     """把一段日志交给 LLM,返回结构化的 Diagnosis。"""
     client = Anthropic()  # 自动读环境变量 ANTHROPIC_API_KEY
-    model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    model = get_settings().anthropic_model
 
     response = client.messages.create(
         model=model,
@@ -86,11 +87,11 @@ def main() -> None:
     if len(sys.argv) < 2:
         print("用法: python -m ops_agent.diagnose <日志文件路径>", file=sys.stderr)
         raise SystemExit(2)
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not get_settings().anthropic_api_key:
         print("缺 ANTHROPIC_API_KEY,先 cp .env.example .env 并填 key", file=sys.stderr)
         raise SystemExit(2)
 
-    log_text = open(sys.argv[1], encoding="utf-8").read()
+    log_text = Path(sys.argv[1]).read_text(encoding="utf-8")
     result = diagnose_log(log_text)
 
     # 结构化结果 → 人读(用 Pydantic 序列化,顺带验证拿到的是合法 Diagnosis)

@@ -22,24 +22,57 @@
 ```bash
 cd ops-agent
 python3.12 -m venv .venv && source .venv/bin/activate   # 需 Python 3.11+
-pip install -r requirements.txt
+pip install -e ".[dev,graph]"     # 开发/测试推荐;仅运行核心也可 pip install -r requirements.txt
 cp .env.example .env          # 填入 ANTHROPIC_API_KEY
 
 # 阶段 1:预喂日志 → 结构化诊断
-python -m ops_agent.diagnose data/sample-console.log
+ops-agent diagnose data/sample-console.log
 # 阶段 2:自然语言问题 → 模型自己调 read_logs 取数据 → 结论
-python -m ops_agent.investigate "console 最近有什么异常?"
+ops-agent investigate "console 最近有什么异常?"
 # 阶段 3:多步 agent(多工具+循环+记忆),交互式多轮
-python -m ops_agent.agent          # 多轮;或:python -m ops_agent.agent "sim 跑批为什么慢?"
+ops-agent chat          # 多轮;或:ops-agent chat "sim 跑批为什么慢?"
 # 阶段 3b:同 agent,但用 LangGraph(循环/记忆/结构化都框架代劳)
-python -m ops_agent.graph_agent
+ops-agent graph
 # 阶段 4:eval(诊断判对没)+ 可选 Langfuse trace
-python -m evals.run_eval            # 确定性打分(需 key 跑诊断)
-python -m evals.run_eval --judge    # + LLM-as-judge
-python -m evals.run_eval --save base.json      # 存基线(改 prompt 后 --baseline base.json 对比升降)
+ops-agent eval            # 确定性打分(需 key 跑诊断)
+ops-agent eval --judge    # + LLM-as-judge
+ops-agent eval --save base.json      # 存基线(改 prompt 后 --baseline base.json 对比升降)
 
-python -m unittest discover tests                       # 离线 mock 测试(无需 key)
+ops-agent doctor          # 检查关键配置
+ops-agent doctor --target file-batch-system
+ops-agent services --target file-batch-system
+ops-agent errors --target file-batch-system --max-lines 50
+ops-agent compose --target file-batch-system
+ops-agent app-config worker-import --target file-batch-system
+ops-agent chat "现在系统哪里异常?" --target file-batch-system
+ops-agent bundle "worker-import 最近为什么失败?" --target file-batch-system
+pytest                    # 离线 mock 测试(无需 key)
+ruff check . && ruff format --check .
 ```
+
+原有 `python -m ops_agent.diagnose` / `python -m ops_agent.agent` 等模块入口仍可用。
+
+## 目标系统上下文
+
+当 `../file-batch-system` 存在时,ops-agent 会自动把它作为目标系统,默认读取
+`../file-batch-system/logs`。也可以显式配置:
+
+```bash
+export OPS_TARGET_ROOT=../file-batch-system
+export OPS_LOG_DIR=../file-batch-system/logs
+export OPS_TRACE_DIR=.ops-agent/traces
+```
+
+多步 agent 现在有这些只读上下文工具:
+
+- `list_services`:列出目标系统模块和日志文件。
+- `tail_recent_errors`:扫描近期 WARN/ERROR/Exception/timeout 等关键行。
+- `inspect_compose`:摘要 docker-compose 中的 PG/Kafka/Redis/Valkey/端口信息。
+- `read_app_config`:读取 Spring application 配置摘要。
+- `read_logs` / `query_pg`:继续用于精确日志和只读 SQL 取证。
+
+`ops-agent bundle` 会生成诊断包目录,包含 `diagnosis.json`、`trace.jsonl`、
+`evidence.log` 和 `summary.md`。
 
 `diagnose.py` 已实现:读日志 → 用 Anthropic function calling 逼模型按 `models.Diagnosis`
 schema 返回 → Pydantic 校验成对象。**概念详解见 [`docs/phase1-concepts.md`](docs/phase1-concepts.md)**

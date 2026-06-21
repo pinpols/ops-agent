@@ -1,10 +1,9 @@
 """两种打分:确定性(免费/可复现)+ LLM-as-judge(评语义)。"""
 
-import os
-
 from pydantic import BaseModel, Field
 
 from evals.cases import Case
+from ops_agent.config import get_settings
 from ops_agent.models import Diagnosis, Severity
 
 
@@ -32,7 +31,9 @@ class JudgeVerdict(BaseModel):
     """LLM 评委的结构化判定。"""
 
     correct: bool = Field(description="该诊断对这段日志而言是否基本正确(根因方向对、无明显幻觉)")
-    score: float = Field(ge=0.0, le=1.0, description="质量分 0~1:根因准确度+证据相关性+建议有用性综合")
+    score: float = Field(
+        ge=0.0, le=1.0, description="质量分 0~1:根因准确度+证据相关性+建议有用性综合"
+    )
     reasoning: str = Field(description="给分理由,指出对在哪/错在哪(一两句)")
 
 
@@ -49,7 +50,7 @@ def llm_judge(d: Diagnosis, case: Case) -> JudgeVerdict:
     from anthropic import Anthropic
 
     client = Anthropic()
-    model = os.environ.get("ANTHROPIC_JUDGE_MODEL", os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"))
+    model = get_settings().anthropic_judge_model
     tool = {
         "name": "submit_verdict",
         "description": "提交对诊断的评判。",
@@ -61,8 +62,11 @@ def llm_judge(d: Diagnosis, case: Case) -> JudgeVerdict:
         "评判该结论,通过 submit_verdict 返回。"
     )
     resp = client.messages.create(
-        model=model, max_tokens=512, system=_JUDGE_SYSTEM,
-        tools=[tool], tool_choice={"type": "tool", "name": "submit_verdict"},
+        model=model,
+        max_tokens=512,
+        system=_JUDGE_SYSTEM,
+        tools=[tool],
+        tool_choice={"type": "tool", "name": "submit_verdict"},
         messages=[{"role": "user", "content": content}],
     )
     verdict = next((b.input for b in resp.content if b.type == "tool_use"), None)

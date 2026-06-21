@@ -1,9 +1,9 @@
 """跑全集 → scorecard。改 prompt / 换模型后重跑,对比分数=量化回归(不靠感觉)。
 
-  python -m evals.run_eval                      # 仅确定性打分
-  python -m evals.run_eval --judge              # + LLM-as-judge
-  python -m evals.run_eval --save base.json     # 把本次结果存为基线
-  python -m evals.run_eval --baseline base.json # 与基线对比,显示每条/总分的升降
+python -m evals.run_eval                      # 仅确定性打分
+python -m evals.run_eval --judge              # + LLM-as-judge
+python -m evals.run_eval --save base.json     # 把本次结果存为基线
+python -m evals.run_eval --baseline base.json # 与基线对比,显示每条/总分的升降
 """
 
 import argparse
@@ -62,7 +62,8 @@ def main() -> None:
 
     print(f"\n跑 {agg['total']} 条 (judge={'on' if args.judge else 'off'})\n")
     for cid, r in results.items():
-        line = f"[{'PASS' if r['passed'] else 'FAIL'}] {cid:18} severity={r['severity']} 召回={r['keyword_recall']}"
+        status = "PASS" if r["passed"] else "FAIL"
+        line = f"[{status}] {cid:18} severity={r['severity']} 召回={r['keyword_recall']}"
         if r["missed_keywords"]:
             line += f" 漏词={r['missed_keywords']}"
         if not r["normal_ok"]:

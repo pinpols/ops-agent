@@ -1,0 +1,68 @@
+"""Create local diagnosis bundles."""
+
+import json
+from dataclasses import asdict
+from datetime import UTC, datetime
+from pathlib import Path
+
+from ops_agent.agent import AgentStepTrace, run_agent
+from ops_agent.config import get_settings
+from ops_agent.models import Diagnosis
+
+
+def _safe_slug(text: str, *, max_len: int = 48) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in text).strip("-")
+    slug = "-".join(part for part in slug.split("-") if part)
+    return (slug or "diagnosis")[:max_len]
+
+
+def _write_jsonl(path: Path, records: list[dict]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def create_bundle(question: str) -> Path:
+    settings = get_settings()
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    bundle_dir = settings.ops_bundle_dir / f"{ts}-{_safe_slug(question)}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    diagnosis, _, trace = run_agent(question, include_trace=True)
+    assert isinstance(diagnosis, Diagnosis)
+    assert all(isinstance(step, AgentStepTrace) for step in trace)
+
+    (bundle_dir / "diagnosis.json").write_text(
+        diagnosis.model_dump_json(indent=2), encoding="utf-8"
+    )
+    _write_jsonl(
+        bundle_dir / "trace.jsonl",
+        [
+            {"type": "question", "question": question, "timestamp": ts},
+            *(dict(type="tool_step", **asdict(step)) for step in trace),
+            {"type": "diagnosis", "diagnosis": diagnosis.model_dump(mode="json")},
+        ],
+    )
+    (bundle_dir / "evidence.log").write_text(
+        "\n\n".join(step.output for step in trace if step.output), encoding="utf-8"
+    )
+    (bundle_dir / "summary.md").write_text(
+        "\n".join(
+            [
+                f"# {diagnosis.summary}",
+                "",
+                f"- Severity: {diagnosis.severity.value}",
+                f"- Confidence: {diagnosis.confidence}",
+                f"- Root cause: {diagnosis.root_cause}",
+                f"- Suggested action: {diagnosis.suggested_action}",
+                "",
+                "## Evidence",
+                *(f"- {item}" for item in diagnosis.evidence),
+                "",
+                "## Tool Steps",
+                *(f"- step {step.step}: {step.tool_name} ok={step.ok}" for step in trace),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return bundle_dir

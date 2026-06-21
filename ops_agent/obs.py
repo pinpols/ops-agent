@@ -4,15 +4,16 @@
 agent/eval 照常跑。要看 trace 时:pip install langfuse + 设 LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST。
 """
 
-import os
 from collections.abc import Callable
 from typing import TypeVar
+
+from ops_agent.config import get_settings
 
 F = TypeVar("F", bound=Callable)
 
 
 def _enabled() -> bool:
-    return bool(os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY"))
+    return get_settings().langfuse_enabled
 
 
 def observe(fn: F) -> F:

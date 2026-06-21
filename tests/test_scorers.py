@@ -11,15 +11,23 @@ from ops_agent.models import Diagnosis, Severity
 
 def _diag(severity, summary="", root_cause="", evidence=None):
     return Diagnosis(
-        severity=severity, summary=summary, root_cause=root_cause,
-        evidence=evidence or [], suggested_action="x", confidence=0.7,
+        severity=severity,
+        summary=summary,
+        root_cause=root_cause,
+        evidence=evidence or [],
+        suggested_action="x",
+        confidence=0.7,
     )
 
 
 class DeterministicScoreTest(unittest.TestCase):
     def test_pass_when_severity_and_keywords_match(self):
         case = Case("redis", "log", Severity.WARNING, ["redis", "16379"])
-        d = _diag(Severity.WARNING, root_cause="Redis 连接被拒", evidence=["refused localhost:16379"])
+        d = _diag(
+            Severity.WARNING,
+            root_cause="Redis 连接被拒",
+            evidence=["refused localhost:16379"],
+        )
         r = scorers.deterministic_score(d, case)
         self.assertTrue(r["passed"])
         self.assertEqual(r["keyword_recall"], 1.0)
@@ -50,7 +58,9 @@ class LlmJudgeTest(unittest.TestCase):
     @patch("anthropic.Anthropic")
     def test_parses_verdict(self, anthropic_cls):
         block = SimpleNamespace(
-            type="tool_use", id="v", name="submit_verdict",
+            type="tool_use",
+            id="v",
+            name="submit_verdict",
             input={"correct": True, "score": 0.85, "reasoning": "根因对"},
         )
         anthropic_cls.return_value.messages.create.return_value = SimpleNamespace(

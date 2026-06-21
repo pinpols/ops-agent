@@ -5,12 +5,12 @@
 运行:  python -m ops_agent.investigate "console 最近有什么异常?"
 """
 
-import os
 import sys
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
+from ops_agent.config import get_settings
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
 from ops_agent.models import Diagnosis
@@ -25,7 +25,7 @@ _SYSTEM_PROMPT = (
 
 def investigate(question: str, *, max_tokens: int = 1024) -> Diagnosis:
     client = Anthropic()
-    model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    model = get_settings().anthropic_model
     report_tool = build_report_tool()
     tools = [READ_LOGS_TOOL, report_tool]
 
@@ -33,8 +33,11 @@ def investigate(question: str, *, max_tokens: int = 1024) -> Diagnosis:
 
     # 回合 1:模型 auto 决定调哪个工具(预期先 read_logs)
     resp = client.messages.create(
-        model=model, max_tokens=max_tokens, system=_SYSTEM_PROMPT,
-        tools=tools, messages=messages,
+        model=model,
+        max_tokens=max_tokens,
+        system=_SYSTEM_PROMPT,
+        tools=tools,
+        messages=messages,
     )
 
     # 处理工具回合:执行 read_logs 并喂回,直到模型给出 report_diagnosis(单工具场景通常 1~2 轮)
@@ -58,8 +61,12 @@ def investigate(question: str, *, max_tokens: int = 1024) -> Diagnosis:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "content": output})
             else:
                 results.append(
-                    {"type": "tool_result", "tool_use_id": tu.id,
-                     "content": f"unknown tool {tu.name}", "is_error": True}
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "content": f"unknown tool {tu.name}",
+                        "is_error": True,
+                    }
                 )
 
         if report_input is not None:
@@ -68,16 +75,22 @@ def investigate(question: str, *, max_tokens: int = 1024) -> Diagnosis:
         # 把工具结果喂回,继续下一回合
         messages.append({"role": "user", "content": results})
         resp = client.messages.create(
-            model=model, max_tokens=max_tokens, system=_SYSTEM_PROMPT,
-            tools=tools, messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            system=_SYSTEM_PROMPT,
+            tools=tools,
+            messages=messages,
         )
 
     # 兜底:模型读了数据但没主动调 report → 强制它给结构化结论
     messages.append({"role": "assistant", "content": resp.content})
     messages.append({"role": "user", "content": "基于以上日志,用 report_diagnosis 给出结论。"})
     final = client.messages.create(
-        model=model, max_tokens=max_tokens, system=_SYSTEM_PROMPT,
-        tools=[report_tool], tool_choice={"type": "tool", "name": REPORT_TOOL_NAME},
+        model=model,
+        max_tokens=max_tokens,
+        system=_SYSTEM_PROMPT,
+        tools=[report_tool],
+        tool_choice={"type": "tool", "name": REPORT_TOOL_NAME},
         messages=messages,
     )
     report_input = next((b.input for b in final.content if b.type == "tool_use"), None)
@@ -91,7 +104,7 @@ def main() -> None:
     if len(sys.argv) < 2:
         print('用法: python -m ops_agent.investigate "你的运维问题"', file=sys.stderr)
         raise SystemExit(2)
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not get_settings().anthropic_api_key:
         print("缺 ANTHROPIC_API_KEY,先 cp .env.example .env 并填 key", file=sys.stderr)
         raise SystemExit(2)
 

@@ -17,6 +17,13 @@ class ReadLogsTest(unittest.TestCase):
         self.assertIn("read_logs", out)
         self.assertIn("BatchConsoleApiApplication", out)  # 样本里确有
 
+    def test_read_logs_result_is_structured(self):
+        result = tools.read_logs_result("console", max_lines=1)
+        self.assertTrue(result.ok)
+        self.assertIn("read_logs", result.to_text())
+        self.assertEqual(result.metadata["service"], "console")
+        self.assertEqual(result.metadata["returned_lines"], 1)
+
     def test_pattern_filters_lines(self):
         out = tools.read_logs("console", pattern="WARN|ERROR")
         self.assertIn("WARN", out)
@@ -26,11 +33,26 @@ class ReadLogsTest(unittest.TestCase):
         out = tools.read_logs("console", max_lines=2)
         # header + 至多 2 行
         body = out.split("\n", 1)[1] if "\n" in out else ""
-        self.assertLessEqual(len([l for l in body.splitlines() if l]), 2)
+        self.assertLessEqual(len([line for line in body.splitlines() if line]), 2)
 
     def test_rejects_path_traversal_service(self):
         self.assertIn("非法", tools.read_logs("../etc"))
         self.assertIn("非法", tools.read_logs("a/b"))
+        self.assertIn("非法", tools.read_logs(123))
+
+    def test_rejects_invalid_pattern(self):
+        self.assertIn("正则非法", tools.read_logs("console", pattern="["))
+        self.assertIn("pattern 必须", tools.read_logs("console", pattern=["WARN"]))
+
+    def test_rejects_invalid_max_lines(self):
+        self.assertIn("必须大于 0", tools.read_logs("console", max_lines=0))
+        self.assertIn("必须大于 0", tools.read_logs("console", max_lines=-1))
+        self.assertIn("必须是正整数", tools.read_logs("console", max_lines=True))
+
+    def test_accepts_string_max_lines_from_model(self):
+        out = tools.read_logs("console", max_lines="2")
+        body = out.split("\n", 1)[1] if "\n" in out else ""
+        self.assertLessEqual(len([line for line in body.splitlines() if line]), 2)
 
     def test_no_match_service(self):
         self.assertIn("未找到", tools.read_logs("nonexistent"))
@@ -44,6 +66,7 @@ class QueryPgSafetyTest(unittest.TestCase):
 
     def test_rejects_non_select(self):
         self.assertIn("只允许", tools.query_pg("update t set x=1"))
+        self.assertIn("SQL 必须", tools.query_pg(123))
 
     def test_rejects_multi_statement(self):
         # 含 ; 先被多语句闸拦(在关键词闸之前)
@@ -52,11 +75,25 @@ class QueryPgSafetyTest(unittest.TestCase):
 
     def test_rejects_forbidden_in_select(self):
         # 以 with 开头但夹带 delete
-        self.assertIn("被禁", tools.query_pg("with x as (delete from t returning *) select * from x"))
+        self.assertIn(
+            "被禁",
+            tools.query_pg("with x as (delete from t returning *) select * from x"),
+        )
 
     def test_select_passes_guard_then_needs_dsn(self):
         # 合法 SELECT 过了字符串闸 → 因没配 DSN 停下(证明 guard 放行了合法查询)
         self.assertIn("OPS_PG_DSN", tools.query_pg("select count(*) from batch.job_instance"))
+
+    def test_query_pg_result_is_structured(self):
+        result = tools.query_pg_result("select 1")
+        self.assertFalse(result.ok)
+        self.assertIn("OPS_PG_DSN", result.to_text())
+        self.assertEqual(result.metadata["sql"], "select 1")
+
+    def test_rejects_invalid_max_rows_before_connecting(self):
+        self.assertIn("必须大于 0", tools.query_pg("select 1", max_rows=0))
+        self.assertIn("必须是正整数", tools.query_pg("select 1", max_rows=True))
+        self.assertIn("OPS_PG_DSN", tools.query_pg("select 1", max_rows="2"))
 
 
 if __name__ == "__main__":

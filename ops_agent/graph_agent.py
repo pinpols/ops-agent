@@ -10,23 +10,61 @@
 单次:      python -m ops_agent.graph_agent "sim 跑批为什么慢?"
 """
 
-import os
 import sys
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 
+from ops_agent.config import get_settings
 from ops_agent.models import Diagnosis
+from ops_agent.system_tools import (
+    inspect_compose as _inspect_compose,
+)
+from ops_agent.system_tools import (
+    list_services as _list_services,
+)
+from ops_agent.system_tools import (
+    read_app_config as _read_app_config,
+)
+from ops_agent.system_tools import (
+    tail_recent_errors as _tail_recent_errors,
+)
 from ops_agent.tools import query_pg as _query_pg
 from ops_agent.tools import read_logs as _read_logs
 
 _SYSTEM_PROMPT = (
-    "你是资深 SRE。用 read_logs / query_pg 按需多次取证(日志看错误、SQL 看锁/积压),"
-    "证据够了给出结构化诊断。只依据真实取到的数据,不编造;证据不足给低 confidence;只读,不建议危险操作。"
+    "你是资深 SRE。先用 list_services / tail_recent_errors 建立上下文,"
+    "再用 read_logs / query_pg 按需多次取证(日志看错误、SQL 看锁/积压),"
+    "证据够了给出结构化诊断。只依据真实取到的数据,不编造;"
+    "证据不足给低 confidence;只读,不建议危险操作。"
 )
 
 
 # LangChain 工具 = 给我们已有的纯函数套一层(docstring 会作为 description 发给模型,和裸 SDK 一样)
+@tool
+def list_services() -> str:
+    """列出目标系统中可诊断的服务、模块和日志文件。"""
+    return _list_services()
+
+
+@tool
+def tail_recent_errors(max_lines: int = 200) -> str:
+    """扫描目标日志目录最近 WARN/ERROR/Exception/timeout 等关键行。"""
+    return _tail_recent_errors(max_lines)
+
+
+@tool
+def inspect_compose(max_chars: int = 6000) -> str:
+    """读取目标系统 docker-compose 摘要,识别 PG/Kafka/Redis/Valkey 和服务端口。"""
+    return _inspect_compose(max_chars)
+
+
+@tool
+def read_app_config(service: str | None = None, max_chars: int = 6000) -> str:
+    """读取 Spring application 配置摘要,可指定服务名如 worker-import/orchestrator。"""
+    return _read_app_config(service, max_chars)
+
+
 @tool
 def read_logs(service: str, pattern: str | None = None, max_lines: int = 200) -> str:
     """读取指定服务日志做排查。先取数据再下结论;pattern 是可选正则,过滤关键行。"""
@@ -49,14 +87,19 @@ def build_agent():
     # 升级 langchain 后可平滑切到 create_agent(签名兼容 model/tools/prompt/response_format)。
     from langgraph.prebuilt import create_react_agent
 
-    model = ChatAnthropic(
-        model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"), max_tokens=1024
-    )
+    model = ChatAnthropic(model=get_settings().anthropic_model, max_tokens=1024)
     return create_react_agent(
         model,
-        tools=[read_logs, query_pg],
+        tools=[
+            list_services,
+            tail_recent_errors,
+            inspect_compose,
+            read_app_config,
+            read_logs,
+            query_pg,
+        ],
         prompt=_SYSTEM_PROMPT,
-        response_format=Diagnosis,   # 框架替你做"最后一步结构化输出"
+        response_format=Diagnosis,  # 框架替你做"最后一步结构化输出"
         checkpointer=MemorySaver(),  # 框架替你做"记忆":同 thread_id 自动接上文
     )
 
@@ -72,7 +115,7 @@ def run(agent, question: str, thread_id: str = "default") -> Diagnosis:
 
 def main() -> None:
     load_dotenv()
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not get_settings().anthropic_api_key:
         print("缺 ANTHROPIC_API_KEY,先 cp .env.example .env 并填 key", file=sys.stderr)
         raise SystemExit(2)
 

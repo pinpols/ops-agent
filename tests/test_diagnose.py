@@ -7,7 +7,9 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
+from pydantic import ValidationError
 
 from ops_agent import diagnose
 from ops_agent.models import Diagnosis, Severity
@@ -63,7 +65,7 @@ class DiagnoseLogTest(unittest.TestCase):
                 "confidence": 9.9,
             }
         )
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             diagnose.diagnose_log("...")
 
 
