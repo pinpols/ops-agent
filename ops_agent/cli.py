@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -136,7 +137,20 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         if settings.ops_target_root and settings.ops_target_root.exists()
         else 0
     )
+    db_user = urlparse(settings.ops_pg_dsn).username if settings.ops_pg_dsn else None
+    db_user_minimal = bool(db_user and db_user.lower() not in {"postgres", "root", "admin"})
+    log_dir_writable = (
+        os.access(settings.ops_log_dir, os.W_OK) if settings.ops_log_dir.exists() else False
+    )
+    prod_ready = not settings.production or (
+        not settings.ops_sql_allow_free
+        and bool(settings.ops_exec_allowlist)
+        and db_user_minimal
+        and settings.ops_log_dir.exists()
+        and not log_dir_writable
+    )
     checks = {
+        "OPS_PROFILE": settings.ops_profile,
         "ANTHROPIC_API_KEY": bool(settings.anthropic_api_key),
         "ANTHROPIC_MODEL": settings.anthropic_model,
         "ANTHROPIC_JUDGE_MODEL": settings.anthropic_judge_model,
@@ -144,14 +158,23 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         "TARGET_ROOT_EXISTS": settings.has_target_root,
         "OPS_LOG_DIR": settings.ops_log_dir,
         "LOG_DIR_EXISTS": settings.ops_log_dir.exists(),
+        "LOG_DIR_WRITABLE": log_dir_writable,
+        "LOG_DIR_READ_ONLY_OK": settings.ops_log_dir.exists() and not log_dir_writable,
         "COMPOSE_FILES": compose_count,
         "BATCH_MODULES": module_count,
         "OPS_PG_DSN": settings.has_pg,
+        "OPS_PG_USER": db_user,
+        "OPS_PG_USER_MINIMAL_OK": db_user_minimal,
+        "OPS_SQL_ALLOW_FREE": settings.ops_sql_allow_free,
         "OPS_ALLOW_EXEC": settings.ops_allow_exec,
         "OPS_RESTART_CMD": bool(settings.ops_restart_cmd),
+        "OPS_EXEC_ALLOWLIST": settings.ops_exec_allowlist,
+        "OPS_APPROVAL_LOG": settings.ops_approval_log,
+        "OPS_REDACT_ARTIFACTS": settings.ops_redact_artifacts,
         "OPS_TRACE_DIR": settings.ops_trace_dir,
         "OPS_BUNDLE_DIR": settings.ops_bundle_dir,
         "LANGFUSE_ENABLED": settings.langfuse_enabled,
+        "PROD_READY": prod_ready,
     }
     for key, value in checks.items():
         print(f"{key}: {value}")

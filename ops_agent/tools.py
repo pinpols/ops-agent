@@ -3,10 +3,13 @@
 阶段 2 只有 read_logs(读日志)。query_pg(只读 SQL)等留到后面。
 """
 
+import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 from ops_agent.config import get_settings
+from ops_agent.sql_templates import SQL_TEMPLATES, list_sql_templates
 from ops_agent.tool_result import ToolResult
 
 # 服务名白名单:只允许小写字母/数字/连字符。挡掉路径穿越(.. / /),
@@ -56,7 +59,13 @@ def read_logs_result(service: str, pattern: str | None = None, max_lines: int = 
     if err:
         return ToolResult.failure(err, service=service, pattern=pattern)
 
-    base = _log_dir()
+    settings = get_settings()
+    base = settings.ops_log_dir
+    if settings.production and base.exists() and os.access(base, os.W_OK):
+        return ToolResult.failure(
+            "[read_logs] 生产 profile 要求日志目录只读挂载,当前目录可写,拒绝读取",
+            log_dir=str(base),
+        )
     # 只在日志目录内 glob *<service>*.log;resolve 后再确认仍在 base 下(双保险防穿越)
     matches = sorted(p for p in base.glob(f"*{service}*.log") if p.resolve().is_relative_to(base))
     if not matches:
@@ -147,42 +156,51 @@ READ_LOGS_TOOL = {
 # 黑名单(第一道、给清晰报错);真正承重的是连接级 default_transaction_read_only=on。
 _SQL_FORBIDDEN = re.compile(
     r"\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|copy|"
-    r"merge|call|do|vacuum|reindex|comment|lock)\b",
+    r"merge|call|do|vacuum|reindex|comment)\b",
     re.IGNORECASE,
 )
 
 
-def query_pg_result(sql: str, max_rows: int = 50) -> ToolResult:
-    """对平台库执行**只读** SQL,返回结构化工具结果。"""
+def _validate_select_sql(sql: object) -> tuple[str | None, ToolResult | None]:
     if not isinstance(sql, str):
-        return ToolResult.failure(f"[query_pg] SQL 必须是字符串,收到 {type(sql).__name__}")
+        return None, ToolResult.failure(f"[query_pg] SQL 必须是字符串,收到 {type(sql).__name__}")
     s = (sql or "").strip().rstrip(";").strip()
     if not s:
-        return ToolResult.failure("[query_pg] 空 SQL")
+        return None, ToolResult.failure("[query_pg] 空 SQL")
     low = s.lower()
     if not (low.startswith("select") or low.startswith("with")):
-        return ToolResult.failure("[query_pg] 只允许 SELECT / WITH 查询", sql=s)
+        return None, ToolResult.failure("[query_pg] 只允许 SELECT / WITH 查询", sql=s)
     if ";" in s:
-        return ToolResult.failure("[query_pg] 禁止多语句(含 ;)", sql=s)
+        return None, ToolResult.failure("[query_pg] 禁止多语句(含 ;)", sql=s)
     if _SQL_FORBIDDEN.search(s):
-        return ToolResult.failure("[query_pg] 含被禁关键词(只读工具,不允许写/DDL)", sql=s)
-    cap, err = _coerce_positive_limit(
-        max_rows, default=50, cap=_QUERY_ROW_CAP, name="query_pg.max_rows"
-    )
-    if err:
-        return ToolResult.failure(err, sql=s)
+        return None, ToolResult.failure("[query_pg] 含被禁关键词(只读工具,不允许写/DDL)", sql=s)
+    return s, None
 
-    dsn = get_settings().ops_pg_dsn
+
+def _execute_readonly_sql(sql: str, *, cap: int, source: str) -> ToolResult:
+    settings = get_settings()
+    dsn = settings.ops_pg_dsn
     if not dsn:
         return ToolResult.failure(
             "[query_pg] 未配 OPS_PG_DSN(如 postgresql://user:pass@localhost:5432/db),跳过",
-            sql=s,
+            sql=sql,
+            source=source,
+        )
+    db_user = urlparse(dsn).username
+    if settings.production and (not db_user or db_user.lower() in {"postgres", "root", "admin"}):
+        return ToolResult.failure(
+            "[query_pg] 生产 profile 要求最小权限只读 DB 用户,拒绝使用高权限/未知用户",
+            sql=sql,
+            source=source,
+            db_user=db_user,
         )
 
     try:
         import psycopg
     except ImportError:
-        return ToolResult.failure("[query_pg] 未装 psycopg:pip install 'psycopg[binary]'", sql=s)
+        return ToolResult.failure(
+            "[query_pg] 未装 psycopg:pip install 'psycopg[binary]'", sql=sql, source=source
+        )
 
     try:
         # 连接级只读 + 语句超时(最硬的护栏:就算字符串闸被绕,DB 也拒绝写/慢查询)
@@ -194,24 +212,75 @@ def query_pg_result(sql: str, max_rows: int = 50) -> ToolResult:
             ) as conn,
             conn.cursor() as cur,
         ):
-            cur.execute(s)
+            cur.execute(sql)
             cols = [d.name for d in cur.description] if cur.description else []
             rows = cur.fetchmany(cap)
     except Exception as e:  # noqa: BLE001 — 工具边界,任何 DB 错都转成给模型的文本
-        return ToolResult.failure(f"[query_pg] 执行失败:{type(e).__name__}: {e}", sql=s)
+        return ToolResult.failure(
+            f"[query_pg] 执行失败:{type(e).__name__}: {e}", sql=sql, source=source
+        )
 
     if not rows:
-        return ToolResult.success(f"[query_pg] 0 行。列:{cols}", sql=s, columns=cols, row_count=0)
+        return ToolResult.success(
+            f"[query_pg] 0 行。列:{cols}",
+            sql=sql,
+            source=source,
+            columns=cols,
+            row_count=0,
+        )
     lines = [" | ".join(cols), "-" * 40]
     lines += [" | ".join(str(v) for v in r) for r in rows]
     more = f"\n(已截断,最多 {cap} 行)" if len(rows) == cap else ""
     return ToolResult.success(
         "\n".join(lines) + more,
-        sql=s,
+        sql=sql,
+        source=source,
         columns=cols,
         row_count=len(rows),
         truncated=len(rows) == cap,
     )
+
+
+def query_pg_template_result(template: str, max_rows: int = 50) -> ToolResult:
+    """Run an approved read-only SQL template."""
+    if template not in SQL_TEMPLATES:
+        return ToolResult.failure(
+            f"[query_pg_template] 未知模板:{template!r};可用模板:\n{list_sql_templates()}",
+            template=template,
+        )
+    cap, err = _coerce_positive_limit(
+        max_rows, default=50, cap=_QUERY_ROW_CAP, name="query_pg_template.max_rows"
+    )
+    if err:
+        return ToolResult.failure(err, template=template)
+    sql, validation_error = _validate_select_sql(SQL_TEMPLATES[template])
+    if validation_error:
+        return validation_error
+    return _execute_readonly_sql(sql, cap=cap, source=f"template:{template}")
+
+
+def query_pg_template(template: str, max_rows: int = 50) -> str:
+    return query_pg_template_result(template, max_rows).to_text()
+
+
+def query_pg_result(sql: str, max_rows: int = 50) -> ToolResult:
+    """对平台库执行**只读** SQL,返回结构化工具结果。"""
+    settings = get_settings()
+    if not settings.ops_sql_allow_free:
+        return ToolResult.failure(
+            "[query_pg] 当前 profile 禁止自由 SQL;请改用 query_pg_template",
+            profile=settings.ops_profile,
+            available_templates=sorted(SQL_TEMPLATES),
+        )
+    s, validation_error = _validate_select_sql(sql)
+    if validation_error:
+        return validation_error
+    cap, err = _coerce_positive_limit(
+        max_rows, default=50, cap=_QUERY_ROW_CAP, name="query_pg.max_rows"
+    )
+    if err:
+        return ToolResult.failure(err, sql=s)
+    return _execute_readonly_sql(s, cap=cap, source="free_sql")
 
 
 def query_pg(sql: str, max_rows: int = 50) -> str:
@@ -244,7 +313,39 @@ QUERY_PG_TOOL = {
     },
 }
 
+QUERY_PG_TEMPLATE_TOOL = {
+    "name": "query_pg_template",
+    "description": (
+        "执行预先批准的只读 SQL 模板。生产 profile 必须优先用它,"
+        f"可用模板: {', '.join(sorted(SQL_TEMPLATES))}。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "template": {
+                "type": "string",
+                "description": f"模板名之一: {', '.join(sorted(SQL_TEMPLATES))}",
+            },
+            "max_rows": {
+                "type": "integer",
+                "description": "最多返回行数,默认 50,上限 200",
+                "minimum": 1,
+                "maximum": _QUERY_ROW_CAP,
+            },
+        },
+        "required": ["template"],
+    },
+}
+
 
 # 工具名 → 实现 的派发表(执行 tool_use 时用)
-TOOL_IMPLS = {"read_logs": read_logs, "query_pg": query_pg}
-TOOL_RESULT_IMPLS = {"read_logs": read_logs_result, "query_pg": query_pg_result}
+TOOL_IMPLS = {
+    "read_logs": read_logs,
+    "query_pg": query_pg,
+    "query_pg_template": query_pg_template,
+}
+TOOL_RESULT_IMPLS = {
+    "read_logs": read_logs_result,
+    "query_pg": query_pg_result,
+    "query_pg_template": query_pg_template_result,
+}

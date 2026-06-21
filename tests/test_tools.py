@@ -11,6 +11,7 @@ class ReadLogsTest(unittest.TestCase):
     def setUp(self):
         # 指向项目 data/(内有 sample-console.log)
         os.environ["OPS_LOG_DIR"] = str(Path(__file__).resolve().parent.parent / "data")
+        os.environ.pop("OPS_PROFILE", None)
 
     def test_reads_matching_service(self):
         out = tools.read_logs("console")
@@ -57,12 +58,20 @@ class ReadLogsTest(unittest.TestCase):
     def test_no_match_service(self):
         self.assertIn("未找到", tools.read_logs("nonexistent"))
 
+    def test_prod_rejects_writable_log_dir(self):
+        os.environ["OPS_PROFILE"] = "prod"
+        result = tools.read_logs_result("console")
+        self.assertFalse(result.ok)
+        self.assertIn("只读挂载", result.to_text())
+
 
 class QueryPgSafetyTest(unittest.TestCase):
     """query_pg 护栏:字符串闸在连库前就拦下危险 SQL(不需真 DB)。"""
 
     def setUp(self):
         os.environ.pop("OPS_PG_DSN", None)  # 确保停在"未配 DSN"而非真连库
+        os.environ.pop("OPS_PROFILE", None)
+        os.environ.pop("OPS_SQL_ALLOW_FREE", None)
 
     def test_rejects_non_select(self):
         self.assertIn("只允许", tools.query_pg("update t set x=1"))
@@ -89,6 +98,27 @@ class QueryPgSafetyTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("OPS_PG_DSN", result.to_text())
         self.assertEqual(result.metadata["sql"], "select 1")
+
+    def test_prod_profile_rejects_free_sql(self):
+        os.environ["OPS_PROFILE"] = "prod"
+        result = tools.query_pg_result("select 1")
+        self.assertFalse(result.ok)
+        self.assertIn("禁止自由 SQL", result.to_text())
+        self.assertIn("pg_lock_waits", result.metadata["available_templates"])
+
+    def test_query_pg_template_passes_template_guard_then_needs_dsn(self):
+        os.environ["OPS_PROFILE"] = "prod"
+        result = tools.query_pg_template_result("pg_lock_waits")
+        self.assertFalse(result.ok)
+        self.assertIn("OPS_PG_DSN", result.to_text())
+        self.assertEqual(result.metadata["source"], "template:pg_lock_waits")
+
+    def test_prod_rejects_privileged_db_user(self):
+        os.environ["OPS_PROFILE"] = "prod"
+        os.environ["OPS_PG_DSN"] = "postgresql://postgres:pass@localhost:5432/db"
+        result = tools.query_pg_template_result("pg_lock_waits")
+        self.assertFalse(result.ok)
+        self.assertIn("最小权限", result.to_text())
 
     def test_rejects_invalid_max_rows_before_connecting(self):
         self.assertIn("必须大于 0", tools.query_pg("select 1", max_rows=0))

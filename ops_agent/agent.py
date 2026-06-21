@@ -15,6 +15,7 @@ from typing import Any
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
+from ops_agent.audit import append_approval_record
 from ops_agent.config import get_settings
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
@@ -23,13 +24,14 @@ from ops_agent.models import Diagnosis
 from ops_agent.obs import observe
 from ops_agent.system_tools import SYSTEM_TOOL_RESULT_IMPLS, SYSTEM_TOOLS
 from ops_agent.tool_result import ToolResult
-from ops_agent.tools import QUERY_PG_TOOL, READ_LOGS_TOOL, TOOL_RESULT_IMPLS
+from ops_agent.tools import QUERY_PG_TEMPLATE_TOOL, QUERY_PG_TOOL, READ_LOGS_TOOL, TOOL_RESULT_IMPLS
 from ops_agent.trace_io import write_agent_trace
 
 _SYSTEM_PROMPT = (
     "你是资深 SRE。工具:list_services(列服务)、tail_recent_errors(扫近期异常)、"
     "inspect_compose(看依赖/端口)、read_app_config(看配置)、read_logs(读日志)、"
-    "query_pg(只读 SQL)、restart_service(重启服务,危险)。"
+    "query_pg_template(批准 SQL 模板)、query_pg(自由只读 SQL,生产默认禁用)、"
+    "restart_service(重启服务,危险)。"
     "用户没给明确服务名时,先用 list_services/tail_recent_errors 建立上下文。"
     "先用只读工具按需多次取证,证据够了用 report_diagnosis 给结论。"
     "只在确实定位到某服务卡死、且诊断已说明理由后,才考虑 restart_service(它会要人工审批)。"
@@ -58,6 +60,12 @@ def _console_approver(tool_name: str, tool_input: dict) -> bool:
     return ans == "y"
 
 
+def _safe_tool_input(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    return {"_raw": value}
+
+
 @observe
 def run_agent(
     question: str,
@@ -77,7 +85,14 @@ def run_agent(
     settings = get_settings()
     model = settings.anthropic_model
     approve = approver or _console_approver
-    tools = [*SYSTEM_TOOLS, READ_LOGS_TOOL, QUERY_PG_TOOL, RESTART_TOOL, build_report_tool()]
+    tools = [
+        *SYSTEM_TOOLS,
+        READ_LOGS_TOOL,
+        QUERY_PG_TEMPLATE_TOOL,
+        QUERY_PG_TOOL,
+        RESTART_TOOL,
+        build_report_tool(),
+    ]
 
     messages: list[dict] = list(history or [])
     messages.append({"role": "user", "content": question})
@@ -101,6 +116,7 @@ def run_agent(
 
         results = []
         for tu in tool_uses:
+            tool_input = _safe_tool_input(tu.input)
             if tu.name == REPORT_TOOL_NAME:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "ok"})
                 messages.append({"role": "user", "content": results})
@@ -119,10 +135,16 @@ def run_agent(
             # 危险工具:执行前过审批闸(HITL)
             approved: bool | None = None
             if tu.name in DANGEROUS_TOOLS:
-                approved = approve(tu.name, tu.input)
+                approved = approve(tu.name, tool_input)
+                append_approval_record(
+                    settings.ops_approval_log,
+                    tool_name=tu.name,
+                    tool_input=tool_input,
+                    approved=approved,
+                )
             if approved is False:
                 result = ToolResult.failure(
-                    f"[审批] 用户拒绝执行 {tu.name}({tu.input}),未执行。",
+                    f"[审批] 用户拒绝执行 {tu.name}({tool_input}),未执行。",
                     error_type="approval_denied",
                 )
             else:
@@ -133,7 +155,7 @@ def run_agent(
                     )
                 else:
                     try:
-                        result = impl(**tu.input)
+                        result = impl(**tool_input)
                     except Exception as e:  # noqa: BLE001 - tool boundary
                         result = ToolResult.failure(
                             f"[{tu.name}] 工具异常:{type(e).__name__}: {e}",
@@ -144,7 +166,7 @@ def run_agent(
                 AgentStepTrace(
                     step=step,
                     tool_name=tu.name,
-                    tool_input=dict(tu.input),
+                    tool_input=tool_input,
                     ok=result.ok,
                     output=output,
                     error=result.error,

@@ -74,6 +74,34 @@ export OPS_TRACE_DIR=.ops-agent/traces
 `ops-agent bundle` 会生成诊断包目录,包含 `diagnosis.json`、`trace.jsonl`、
 `evidence.log` 和 `summary.md`。
 
+## 生产化安全开关
+
+生产环境建议显式配置:
+
+```bash
+export OPS_PROFILE=prod
+export OPS_SQL_ALLOW_FREE=false
+export OPS_REDACT_ARTIFACTS=true
+export OPS_APPROVAL_LOG=.ops-agent/approvals.jsonl
+```
+
+生产 profile 下,`query_pg` 自由 SQL 默认禁用,agent 应使用 `query_pg_template`。
+内置模板包括 `pg_lock_waits`、`active_queries`、`job_status_counts`、
+`recent_failed_jobs`。如果需要新增查询,把 SQL 加到 `ops_agent/sql_templates.py`,
+不要让模型直接拼自由 SQL。
+
+危险执行工具必须同时满足:
+
+- `OPS_ALLOW_EXEC=true`
+- `OPS_RESTART_CMD` 已配置
+- `OPS_EXEC_ALLOWLIST` 命中完整命令或 argv[0]
+- agent 审批闸批准
+
+审批结果会写入 `OPS_APPROVAL_LOG`。trace 和 bundle 默认脱敏,会遮蔽常见 token、
+DSN 密码、邮箱和手机号。`ops-agent doctor` 会检查生产 profile 下的自由 SQL、
+执行 allowlist、PG 用户名和日志目录是否可写;生产环境应使用最小权限只读 DB 用户,
+并把日志目录以只读方式挂载。
+
 `diagnose.py` 已实现:读日志 → 用 Anthropic function calling 逼模型按 `models.Diagnosis`
 schema 返回 → Pydantic 校验成对象。**概念详解见 [`docs/phase1-concepts.md`](docs/phase1-concepts.md)**
 (function calling 怎么工作、为什么 Field description 影响输出)。

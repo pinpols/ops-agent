@@ -23,6 +23,13 @@ _ALLOWED_SERVICES = {
 }
 
 
+def _command_allowed(command: str, command_args: list[str], allowlist: tuple[str, ...]) -> bool:
+    if not allowlist:
+        return False
+    executable = command_args[0] if command_args else ""
+    return command in allowlist or executable in allowlist
+
+
 def restart_service_result(service: str) -> ToolResult:
     """重启一个服务(危险/写操作),返回结构化工具结果。"""
     if service not in _ALLOWED_SERVICES:
@@ -50,6 +57,14 @@ def restart_service_result(service: str) -> ToolResult:
     cmd_args = shlex.split(cmd)
     if not cmd_args:
         return ToolResult.failure("[restart_service] OPS_RESTART_CMD 解析后为空", service=service)
+    if not _command_allowed(cmd, cmd_args, settings.ops_exec_allowlist):
+        return ToolResult.failure(
+            "[restart_service] 命令不在 OPS_EXEC_ALLOWLIST 中,拒绝执行",
+            service=service,
+            command=cmd,
+            command_args=cmd_args,
+            allowlist=settings.ops_exec_allowlist,
+        )
     try:
         out = subprocess.run(cmd_args, capture_output=True, text=True, timeout=60)
         content = (

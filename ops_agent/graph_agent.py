@@ -30,11 +30,12 @@ from ops_agent.system_tools import (
     tail_recent_errors as _tail_recent_errors,
 )
 from ops_agent.tools import query_pg as _query_pg
+from ops_agent.tools import query_pg_template as _query_pg_template
 from ops_agent.tools import read_logs as _read_logs
 
 _SYSTEM_PROMPT = (
     "你是资深 SRE。先用 list_services / tail_recent_errors 建立上下文,"
-    "再用 read_logs / query_pg 按需多次取证(日志看错误、SQL 看锁/积压),"
+    "再用 read_logs / query_pg_template 按需多次取证(日志看错误、SQL 模板看锁/积压),"
     "证据够了给出结构化诊断。只依据真实取到的数据,不编造;"
     "证据不足给低 confidence;只读,不建议危险操作。"
 )
@@ -72,6 +73,12 @@ def read_logs(service: str, pattern: str | None = None, max_lines: int = 200) ->
 
 
 @tool
+def query_pg_template(template: str, max_rows: int = 50) -> str:
+    """执行预先批准的只读 SQL 模板。生产 profile 必须优先用它。"""
+    return _query_pg_template(template, max_rows)
+
+
+@tool
 def query_pg(sql: str, max_rows: int = 50) -> str:
     """对平台库执行只读 SQL(单条 SELECT/WITH)查日志看不到的运行态,如 pg_stat_activity、状态计数。"""
     return _query_pg(sql, max_rows)
@@ -96,6 +103,7 @@ def build_agent():
             inspect_compose,
             read_app_config,
             read_logs,
+            query_pg_template,
             query_pg,
         ],
         prompt=_SYSTEM_PROMPT,

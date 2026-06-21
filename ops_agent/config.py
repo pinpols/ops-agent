@@ -7,6 +7,7 @@ from pathlib import Path
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_TRACE_DIR = ".ops-agent/traces"
 DEFAULT_BUNDLE_DIR = ".ops-agent/bundles"
+DEFAULT_APPROVAL_LOG = ".ops-agent/approvals.jsonl"
 
 
 def _project_root() -> Path:
@@ -25,8 +26,14 @@ def _env_bool(name: str, *, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _env_csv(name: str) -> tuple[str, ...]:
+    value = os.environ.get(name, "")
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
+    ops_profile: str
     anthropic_api_key: str | None
     anthropic_model: str
     anthropic_judge_model: str
@@ -35,8 +42,12 @@ class Settings:
     ops_trace_dir: Path | None
     ops_bundle_dir: Path
     ops_pg_dsn: str | None
+    ops_sql_allow_free: bool
     ops_allow_exec: bool
     ops_restart_cmd: str | None
+    ops_exec_allowlist: tuple[str, ...]
+    ops_approval_log: Path
+    ops_redact_artifacts: bool
     langfuse_public_key: str | None
     langfuse_secret_key: str | None
 
@@ -52,8 +63,13 @@ class Settings:
     def has_target_root(self) -> bool:
         return bool(self.ops_target_root and self.ops_target_root.exists())
 
+    @property
+    def production(self) -> bool:
+        return self.ops_profile == "prod"
+
     @classmethod
     def from_env(cls) -> "Settings":
+        profile = os.environ.get("OPS_PROFILE", "dev").strip().lower()
         model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
         target_root = (
             Path(os.environ["OPS_TARGET_ROOT"]).resolve()
@@ -64,6 +80,7 @@ class Settings:
         resolved_log_dir = Path(log_dir).resolve() if log_dir else _default_log_dir(target_root)
         trace_dir = os.environ.get("OPS_TRACE_DIR")
         return cls(
+            ops_profile=profile,
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
             anthropic_model=model,
             anthropic_judge_model=os.environ.get("ANTHROPIC_JUDGE_MODEL", model),
@@ -72,8 +89,14 @@ class Settings:
             ops_trace_dir=Path(trace_dir).resolve() if trace_dir else None,
             ops_bundle_dir=Path(os.environ.get("OPS_BUNDLE_DIR", DEFAULT_BUNDLE_DIR)).resolve(),
             ops_pg_dsn=os.environ.get("OPS_PG_DSN"),
+            ops_sql_allow_free=_env_bool("OPS_SQL_ALLOW_FREE", default=profile != "prod"),
             ops_allow_exec=_env_bool("OPS_ALLOW_EXEC"),
             ops_restart_cmd=os.environ.get("OPS_RESTART_CMD"),
+            ops_exec_allowlist=_env_csv("OPS_EXEC_ALLOWLIST"),
+            ops_approval_log=Path(
+                os.environ.get("OPS_APPROVAL_LOG", DEFAULT_APPROVAL_LOG)
+            ).resolve(),
+            ops_redact_artifacts=_env_bool("OPS_REDACT_ARTIFACTS", default=True),
             langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
             langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
         )
