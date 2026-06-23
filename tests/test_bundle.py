@@ -27,7 +27,7 @@ class BundleTest(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("OPS_BUNDLE_DIR", None)
 
-    @patch("ops_agent.agent.Anthropic")
+    @patch("ops_agent.agent.make_client")
     def test_create_bundle_writes_expected_files(self, anthropic_cls):
         anthropic_cls.return_value.messages.create.side_effect = [
             _resp(_tu("a", "read_logs", {"service": "console", "max_lines": 1})),

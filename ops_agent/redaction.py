@@ -7,6 +7,10 @@ from typing import Any
 _PATTERNS = [
     (re.compile(r"sk-ant-[A-Za-z0-9_-]+"), "sk-ant-***"),
     (re.compile(r"gh[opsu]_[A-Za-z0-9_]+"), "gh***"),
+    # AWS Access Key ID:裸出现(无 key= 关键词)也要遮,AKIA + 16 位大写/数字。
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AKIA***"),
+    # JWT:三段 base64url(header.payload.signature),裸出现于日志/头部时遮蔽。
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "***JWT***"),
     (re.compile(r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._-]+"), r"\1***"),
     # 私钥块整段(PEM,含 RSA/EC/OPENSSH 等变体),DOTALL 跨行
     (
@@ -42,7 +46,7 @@ def redact_text(text: str) -> str:
 def redact(value: Any) -> Any:
     if isinstance(value, str):
         return redact_text(value)
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return redact(asdict(value))
     if isinstance(value, dict):
         return {key: redact(item) for key, item in value.items()}

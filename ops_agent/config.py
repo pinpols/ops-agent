@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
+# 合法 profile 闭集。profile 决定 prod fail-closed 闸 + 自由 SQL 默认值,
+# 非法值(如把 "prod" 误写成 "production")绝不能静默当 dev —— 那是 fail-open。
+_ALLOWED_PROFILES = ("dev", "staging", "prod")
 DEFAULT_TRACE_DIR = ".ops-agent/traces"
 DEFAULT_BUNDLE_DIR = ".ops-agent/bundles"
 DEFAULT_APPROVAL_LOG = ".ops-agent/approvals.jsonl"
@@ -37,6 +40,7 @@ class Settings:
     anthropic_api_key: str | None = field(repr=False)  # 防 key 误入 repr/异常栈/日志
     anthropic_model: str
     anthropic_judge_model: str
+    anthropic_max_retries: int
     ops_target_root: Path | None
     ops_log_dir: Path
     ops_trace_dir: Path | None
@@ -71,6 +75,12 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         profile = os.environ.get("OPS_PROFILE", "dev").strip().lower()
+        if profile not in _ALLOWED_PROFILES:
+            raise ValueError(
+                f"OPS_PROFILE={profile!r} 非法,必须是 {list(_ALLOWED_PROFILES)} 之一"
+                "(常见笔误:用了 'production' 而非 'prod')。"
+                "拒绝静默降级为 dev,以免 prod 安全闸被绕过。"
+            )
         model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
         target_root = (
             Path(os.environ["OPS_TARGET_ROOT"]).resolve()
@@ -85,6 +95,7 @@ class Settings:
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
             anthropic_model=model,
             anthropic_judge_model=os.environ.get("ANTHROPIC_JUDGE_MODEL", model),
+            anthropic_max_retries=int(os.environ.get("OPS_LLM_MAX_RETRIES", "4")),
             ops_target_root=target_root,
             ops_log_dir=resolved_log_dir,
             ops_trace_dir=Path(trace_dir).resolve() if trace_dir else None,

@@ -38,6 +38,17 @@ LEAK_SAMPLES = [
         "-----END RSA PRIVATE KEY-----",
         "MIIEowIBAAKCAQEA1234567890",
     ),
+    (
+        "裸 AWS Access Key ID(无关键词)",
+        "auth failed for AKIAIOSFODNN7EXAMPLE",
+        "AKIAIOSFODNN7EXAMPLE",
+    ),
+    (
+        "裸 JWT(无关键词)",
+        "X-Auth eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U end",
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+    ),
 ]
 
 

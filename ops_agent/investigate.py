@@ -7,12 +7,12 @@
 
 import sys
 
-from anthropic import Anthropic
 from dotenv import load_dotenv
 
 from ops_agent.config import get_settings
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
+from ops_agent.llm import make_client
 from ops_agent.models import Diagnosis
 from ops_agent.tools import READ_LOGS_TOOL, TOOL_IMPLS
 
@@ -23,8 +23,8 @@ _SYSTEM_PROMPT = (
 )
 
 
-def investigate(question: str, *, max_tokens: int = 1024) -> Diagnosis:
-    client = Anthropic()
+def investigate(question: str, *, max_tokens: int = 4096) -> Diagnosis:
+    client = make_client()
     model = get_settings().anthropic_model
     report_tool = build_report_tool()
     tools = [READ_LOGS_TOOL, report_tool]

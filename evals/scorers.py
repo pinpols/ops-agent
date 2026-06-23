@@ -47,9 +47,9 @@ _JUDGE_SYSTEM = (
 
 def llm_judge(d: Diagnosis, case: Case) -> JudgeVerdict:
     """另一个 LLM 读 日志+实际诊断,给质量分。需 ANTHROPIC_API_KEY。"""
-    from anthropic import Anthropic
+    from ops_agent.llm import make_client
 
-    client = Anthropic()
+    client = make_client()
     model = get_settings().anthropic_judge_model
     tool = {
         "name": "submit_verdict",

@@ -15,7 +15,7 @@ from ops_agent.redaction import redact
 def _jsonable(value: Any) -> Any:
     if isinstance(value, Diagnosis):
         return value.model_dump(mode="json")
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     return value
 
@@ -27,6 +27,7 @@ def write_agent_trace(
     model: str,
     diagnosis: Diagnosis,
     steps: list[Any],
+    usage: dict[str, int] | None = None,
 ) -> Path:
     trace_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
@@ -37,6 +38,7 @@ def write_agent_trace(
             "timestamp": ts,
             "question": question,
             "model": model,
+            "usage": usage or {"input_tokens": 0, "output_tokens": 0},
         },
         *({"type": "tool_step", **_jsonable(step)} for step in steps),
         {"type": "diagnosis", "diagnosis": _jsonable(diagnosis)},

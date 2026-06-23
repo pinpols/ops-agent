@@ -106,6 +106,21 @@ class ExecToolGuardTest(unittest.TestCase):
         self.assertTrue(result.ok)  # 显式双开关后才真跑
         run.assert_called_once()
 
+    @patch("ops_agent.exec_tools.subprocess.run")
+    def test_allowlist_matches_executable_basename(self, run):
+        # 命令配绝对路径,allowlist 用可执行名(basename):
+        # 旧实现 argv[0]='/bin/echo' 不匹配 'echo' → 误拒。
+        os.environ["OPS_ALLOW_EXEC"] = "true"
+        os.environ["OPS_RESTART_CMD"] = "/bin/echo {service}"
+        os.environ["OPS_EXEC_ALLOWLIST"] = "echo"
+        run.return_value = SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+        result = exec_tools.restart_service_result("orchestrator")
+
+        self.assertTrue(result.ok)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["/bin/echo", "orchestrator"])
+
 
 class HitlApprovalTest(unittest.TestCase):
     def setUp(self):
@@ -122,7 +137,7 @@ class HitlApprovalTest(unittest.TestCase):
             _resp(_tu("b", agent.REPORT_TOOL_NAME, _REPORT)),
         ]
 
-    @patch("ops_agent.agent.Anthropic")
+    @patch("ops_agent.agent.make_client")
     def test_deny_blocks_execution(self, anthropic_cls):
         anthropic_cls.return_value.messages.create.side_effect = self._two_step()
         seen = {}
@@ -145,14 +160,14 @@ class HitlApprovalTest(unittest.TestCase):
         self.assertFalse(records[0]["approved"])
         self.assertEqual(records[0]["tool_name"], "restart_service")
 
-    @patch("ops_agent.agent.Anthropic")
+    @patch("ops_agent.agent.make_client")
     def test_approve_runs_dry_run(self, anthropic_cls):
         anthropic_cls.return_value.messages.create.side_effect = self._two_step()
         d, messages = agent.run_agent("重启 orchestrator", approver=lambda *a: True)
         self.assertIsInstance(d, Diagnosis)
         self.assertIn("DRY-RUN", str(messages))  # 批准 → 执行(默认 dry-run)
 
-    @patch("ops_agent.agent.Anthropic")
+    @patch("ops_agent.agent.make_client")
     def test_approve_writes_execution_audit_record(self, anthropic_cls):
         # 批准并执行后,审计里除 approval 还应有 execution 记录(批准后到底跑没跑成)
         anthropic_cls.return_value.messages.create.side_effect = self._two_step()

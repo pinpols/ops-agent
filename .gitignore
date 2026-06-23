@@ -6,3 +6,7 @@ __pycache__/
 .ops-agent/
 .idea/
 .vscode/
+
+# coverage artifacts
+.coverage
+htmlcov/

@@ -22,7 +22,7 @@ def _fake_response(tool_input: dict):
 
 
 class DiagnoseLogTest(unittest.TestCase):
-    @patch("ops_agent.diagnose.Anthropic")
+    @patch("ops_agent.diagnose.make_client")
     def test_parses_tool_input_into_diagnosis(self, anthropic_cls):
         anthropic_cls.return_value.messages.create.return_value = _fake_response(
             {
@@ -42,7 +42,7 @@ class DiagnoseLogTest(unittest.TestCase):
         self.assertEqual(result.confidence, 0.8)
         self.assertIn("16379", result.evidence[0])
 
-    @patch("ops_agent.diagnose.Anthropic")
+    @patch("ops_agent.diagnose.make_client")
     def test_raises_when_no_tool_use_block(self, anthropic_cls):
         # 模型没调工具(只返回文本)→ 应明确报错,而不是静默返回 None
         text_block = SimpleNamespace(type="text", text="我觉得没问题")
@@ -52,7 +52,7 @@ class DiagnoseLogTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             diagnose.diagnose_log("...")
 
-    @patch("ops_agent.diagnose.Anthropic")
+    @patch("ops_agent.diagnose.make_client")
     def test_invalid_input_fails_pydantic_validation(self, anthropic_cls):
         # confidence 超出 0~1 → Pydantic 校验应拦下(证明 schema 约束真生效)
         anthropic_cls.return_value.messages.create.return_value = _fake_response(

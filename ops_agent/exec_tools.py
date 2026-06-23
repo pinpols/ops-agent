@@ -4,6 +4,7 @@
 设计沿用你 ADR-029 的隔离思路:危险能力单独成类、白名单、默认不真执行、留审批闸。
 """
 
+import os
 import shlex
 import subprocess
 
@@ -23,11 +24,13 @@ _ALLOWED_SERVICES = {
 }
 
 
-def _command_allowed(command: str, command_args: list[str], allowlist: tuple[str, ...]) -> bool:
-    if not allowlist:
+def _command_allowed(command_args: list[str], allowlist: tuple[str, ...]) -> bool:
+    if not command_args or not allowlist:
         return False
-    executable = command_args[0] if command_args else ""
-    return command in allowlist or executable in allowlist
+    executable = command_args[0]
+    # 按完整 argv[0] 或其 basename 匹配:'/bin/echo' 命中 allowlist 里的 'echo',
+    # 避免旧实现 path 形态 vs 名字形态对不上导致的误判/误拒。
+    return executable in allowlist or os.path.basename(executable) in allowlist
 
 
 def restart_service_result(service: str) -> ToolResult:
@@ -62,11 +65,13 @@ def restart_service_result(service: str) -> ToolResult:
             "(如 'bash scripts/local/restart.sh {service}')",
             service=service,
         )
-    cmd = cmd_tpl.format(service=service)
-    cmd_args = shlex.split(cmd)
+    # 先分词模板,再把 {service} 仅替换进单个 token(service 已经过白名单校验;
+    # 这样即便将来放宽校验,service 值也无法拆出额外 argv)。非 shell 执行(argv 列表)。
+    cmd_args = [token.format(service=service) for token in shlex.split(cmd_tpl)]
     if not cmd_args:
         return ToolResult.failure("[restart_service] OPS_RESTART_CMD 解析后为空", service=service)
-    if not _command_allowed(cmd, cmd_args, settings.ops_exec_allowlist):
+    cmd = shlex.join(cmd_args)
+    if not _command_allowed(cmd_args, settings.ops_exec_allowlist):
         return ToolResult.failure(
             "[restart_service] 命令不在 OPS_EXEC_ALLOWLIST 中,拒绝执行",
             service=service,

@@ -8,8 +8,11 @@ version = "0.1.0"
 description = "A small operations diagnosis agent with tool calling, HITL execution, evals, and observability hooks."
 readme = "README.md"
 requires-python = ">=3.11"
+# 下界设到近期已测最小版 + 锁主版本上界:anthropic SDK 在 0.x 内多次破坏式变更,
+# floor 太低(原 >=0.40)会让未来某天 `pip install` 拉到不兼容版本而静默打断 messages.create。
+# 精确复现见 requirements.lock。
 dependencies = [
-    "anthropic>=0.40",
+    "anthropic>=0.69,<1",
     "pydantic>=2.9",
     "python-dotenv>=1.0",
     "psycopg[binary]>=3.2",
@@ -25,6 +28,8 @@ observability = [
 ]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "mypy>=1.11",
     "ruff>=0.8",
 ]
 
@@ -54,3 +59,20 @@ ignore = [
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# Anthropic SDK 用严格 TypedDict 描述 tools/messages;本项目刻意用普通 dict 手搓 payload
+# (阶段教学:可读性 > 类型严格)。仅在这些 LLM 调用边界模块放宽对应错误码,其余模块照常严格检查。
+module = ["ops_agent.agent", "ops_agent.diagnose", "ops_agent.investigate", "evals.scorers"]
+disable_error_code = ["call-overload", "arg-type", "dict-item", "operator", "misc"]
+
+[[tool.mypy.overrides]]
+# TODO(tech-debt): tools/system_tools 有一批 `int | None` 参数被当 int 用的 Optional 标注缺口
+# (运行时调用方都传具体值,非 bug)。先放宽这几码、保留其余检查,后续逐个收紧标注后移除本块。
+module = ["ops_agent.tools", "ops_agent.system_tools"]
+disable_error_code = ["operator", "arg-type", "assignment", "call-overload"]

@@ -7,23 +7,69 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]  # 项目声明 requires-python>=3.11,两版都要过
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
 
       - name: Install
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,graph]"
 
-      - name: Lint
+      - name: Lint (ruff)
         run: ruff check .
 
-      - name: Format check
+      - name: Format check (ruff)
         run: ruff format --check .
 
-      - name: Test
-        run: pytest
+      - name: Type check (mypy)
+        run: mypy ops_agent evals
+
+      - name: Test + coverage gate
+        # 实测 76%;闸设 70 留 6pt 余量防回退,后续补 run_eval/graph_agent 测试再上调。
+        run: pytest --cov=ops_agent --cov=evals --cov-report=term-missing --cov-fail-under=70
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Dependency vuln scan (pip-audit)
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          # 先非阻塞观测(|| true),依赖清干净后去掉以转为硬闸。
+          pip-audit --desc -r requirements.lock || true
+
+  eval:
+    # eval 需真 ANTHROPIC_API_KEY:只在 push(有 secret)时跑,fork PR 无 secret 自动跳过;不阻塞主门。
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,graph]"
+      - name: Eval regression (确定性打分;无 key 则跳过)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "no ANTHROPIC_API_KEY secret configured — skipping eval"; exit 0
+          fi
+          ops-agent eval

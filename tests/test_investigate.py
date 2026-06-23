@@ -23,7 +23,7 @@ class InvestigateTest(unittest.TestCase):
     def setUp(self):
         os.environ["OPS_LOG_DIR"] = str(Path(__file__).resolve().parent.parent / "data")
 
-    @patch("ops_agent.investigate.Anthropic")
+    @patch("ops_agent.investigate.make_client")
     def test_read_then_report_roundtrip(self, anthropic_cls):
         create = anthropic_cls.return_value.messages.create
         # 回合1:模型要读 console 日志(真会被执行)

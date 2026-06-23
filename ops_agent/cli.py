@@ -1,6 +1,7 @@
 """Command line entry point for ops-agent."""
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
@@ -9,6 +10,21 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 from ops_agent.config import get_settings
+
+log = logging.getLogger("ops_agent")
+
+
+def _configure_logging(verbose: bool) -> None:
+    """日志默认 WARNING(可经 OPS_LOG_LEVEL 调),-v 则 DEBUG。
+
+    日志统一走 stderr,带时间戳/级别;stdout 留给机器可读的诊断 JSON,二者不混。
+    """
+    level_name = "DEBUG" if verbose else os.environ.get("OPS_LOG_LEVEL", "WARNING").upper()
+    logging.basicConfig(
+        level=getattr(logging, level_name, logging.WARNING),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
 
 
 def _resolve_target(value: str) -> Path:
@@ -185,10 +201,15 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     }
     for key, value in checks.items():
         print(f"{key}: {value}")
+    # 可做部署前置闸:prod 未就绪 → 非零退出(`ops-agent doctor && deploy`)。
+    if settings.production and not prod_ready:
+        print("PROD_READY=false:生产前置检查未通过(见上方各项)。", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ops-agent")
+    parser.add_argument("-v", "--verbose", action="store_true", help="详细日志(DEBUG,含异常堆栈)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     diagnose = sub.add_parser("diagnose", help="诊断单个日志文件")
@@ -253,21 +274,32 @@ def main(argv: list[str] | None = None) -> None:
     load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
+    _configure_logging(getattr(args, "verbose", False))
     try:
         args.func(args)
     except KeyboardInterrupt:
         print("\n已中断。", file=sys.stderr)
         raise SystemExit(130) from None
+    except FileNotFoundError as e:
+        # 缺输入文件:稳定退出码 3,便于脚本分支
+        print(f"找不到输入文件:{e.filename or e}", file=sys.stderr)
+        raise SystemExit(3) from None
+    except ValueError as e:
+        # 配置/用法错误(如非法 OPS_PROFILE):退出码 2
+        print(f"配置错误:{e}", file=sys.stderr)
+        raise SystemExit(2) from None
     except Exception as e:  # noqa: BLE001 - CLI 顶层兜底:把 LLM/网络等错误转成干净提示,不抛裸堆栈
+        log.debug("命令执行失败", exc_info=True)  # -v 时打印完整堆栈
         from anthropic import APIConnectionError, APIError
 
         if isinstance(e, (APIError, APIConnectionError)):
+            # LLM / 网络:退出码 4
             print(
                 f"LLM 调用失败({type(e).__name__}):{e}\n稍后重试,或检查 ANTHROPIC_API_KEY / 网络。",
                 file=sys.stderr,
             )
-        else:
-            print(f"执行出错({type(e).__name__}):{e}", file=sys.stderr)
+            raise SystemExit(4) from None
+        print(f"执行出错({type(e).__name__}):{e}", file=sys.stderr)
         raise SystemExit(1) from None
 
 

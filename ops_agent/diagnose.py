@@ -12,10 +12,10 @@
 import sys
 from pathlib import Path
 
-from anthropic import Anthropic
 from dotenv import load_dotenv
 
 from ops_agent.config import get_settings
+from ops_agent.llm import make_client
 from ops_agent.models import Diagnosis
 from ops_agent.obs import observe
 
@@ -49,12 +49,12 @@ def _build_tool() -> dict:
 @observe
 def diagnose_log(log_text: str) -> Diagnosis:
     """把一段日志交给 LLM,返回结构化的 Diagnosis。"""
-    client = Anthropic()  # 自动读环境变量 ANTHROPIC_API_KEY
+    client = make_client()  # 自动读环境变量 ANTHROPIC_API_KEY,带重试
     model = get_settings().anthropic_model
 
     response = client.messages.create(
         model=model,
-        max_tokens=1024,
+        max_tokens=4096,
         system=_SYSTEM_PROMPT,
         tools=[_build_tool()],
         # 强制模型必须调用该工具(而不是自由回话)→ 保证拿到结构化参数

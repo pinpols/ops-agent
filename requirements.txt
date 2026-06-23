@@ -1,11 +1,11 @@
-# 阶段 1-2:裸 SDK + 结构化输出(先不上框架)
-anthropic>=0.40
+# 核心运行时依赖(单一真源 = pyproject.toml [project].dependencies)。
+# 此文件仅列“只跑核心”所需;graph / observability / dev 是 pyproject 的可选 extras,
+# 不在此重复(避免与 pyproject 漂移)。精确复现用 requirements.lock。
+#
+# 推荐安装(含开发/测试/LangGraph):  pip install -e ".[dev,graph]"
+# 仅核心:                          pip install -r requirements.txt
+# 完全锁定复现:                    pip install -r requirements.lock
+anthropic>=0.69,<1
 pydantic>=2.9
 python-dotenv>=1.0
-# 阶段 3:query_pg 只读 SQL
 psycopg[binary]>=3.2
-# 阶段 3b:LangGraph 版 agent
-langgraph>=0.2
-langchain-anthropic>=0.3
-# 阶段 4(可选 trace):langfuse —— 不装则 obs 自动 no-op
-# langfuse>=3.0

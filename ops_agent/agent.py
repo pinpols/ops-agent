@@ -12,7 +12,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from anthropic import Anthropic
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
@@ -21,6 +20,7 @@ from ops_agent.config import get_settings
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
 from ops_agent.exec_tools import DANGEROUS_TOOLS, EXEC_TOOL_RESULT_IMPLS, RESTART_TOOL
+from ops_agent.llm import make_client
 from ops_agent.models import Diagnosis
 from ops_agent.obs import observe
 from ops_agent.redaction import redact_text
@@ -77,7 +77,7 @@ def run_agent(
     history: list[dict] | None = None,
     *,
     max_steps: int = 8,
-    max_tokens: int = 1024,
+    max_tokens: int = 4096,
     approver: Callable[[str, dict], bool] | None = None,
     include_trace: bool = False,
 ) -> tuple[Diagnosis, list[dict]] | tuple[Diagnosis, list[dict], list[AgentStepTrace]]:
@@ -86,22 +86,27 @@ def run_agent(
     approver:危险工具(DANGEROUS_TOOLS)执行前的审批闸,返回 True 才执行;
     默认命令行 y/N。测试/自动化可注入。
     """
-    client = Anthropic()
+    client = make_client()
     settings = get_settings()
     model = settings.anthropic_model
     approve = approver or _console_approver
+    # 在最后一个稳定工具上打 ephemeral 缓存断点:tools→system 这段固定前缀在多步循环里
+    # 跨轮重发,命中缓存可大幅省输入 token(工具列表确定且有序,前缀稳定)。
+    report_tool = {**build_report_tool(), "cache_control": {"type": "ephemeral"}}
     tools = [
         *SYSTEM_TOOLS,
         READ_LOGS_TOOL,
         QUERY_PG_TEMPLATE_TOOL,
         QUERY_PG_TOOL,
         RESTART_TOOL,
-        build_report_tool(),
+        report_tool,
     ]
 
     messages: list[dict] = list(history or [])
     messages.append({"role": "user", "content": question})
     trace: list[AgentStepTrace] = []
+    total_in = 0  # 跨步累计 token(成本观测:看哪步贵)
+    total_out = 0
 
     for step in range(1, max_steps + 1):
         resp = client.messages.create(
@@ -111,6 +116,17 @@ def run_agent(
             tools=tools,
             messages=messages,
         )
+        # max_tokens 截断 → 本轮 tool_use/结论可能不完整,继续会喂回部分块或撞 ValidationError。
+        # 显式识别并给可操作报错,而不是静默绕圈。
+        if resp.stop_reason == "max_tokens":
+            raise RuntimeError(
+                f"LLM 响应被 max_tokens={max_tokens} 截断(stop_reason=max_tokens),结果可能不完整;"
+                "请调高 max_tokens 或缩小工具输出(如 read_logs 的 max_lines)。"
+            )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            total_in += getattr(usage, "input_tokens", 0) or 0
+            total_out += getattr(usage, "output_tokens", 0) or 0
         messages.append({"role": "assistant", "content": resp.content})
 
         tool_uses = [b for b in resp.content if b.type == "tool_use"]
@@ -120,13 +136,17 @@ def run_agent(
             continue
 
         results = []
+        diagnosis: Diagnosis | None = None  # 本轮是否产出合规结论
+        report_pending = False  # 本轮调了 report 但结构不合规,需回喂重报
         for tu in tool_uses:
             tool_input = _safe_tool_input(tu.input)
             if tu.name == REPORT_TOOL_NAME:
                 try:
                     diagnosis = Diagnosis.model_validate(tool_input)
+                    results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "ok"})
                 except ValidationError as e:
-                    # 模型给的结论结构不合规(越界/截断):不崩,回喂让它修正后重报。
+                    # 结论结构不合规(越界/截断):不崩,回喂让模型修正后重报。
+                    report_pending = True
                     results.append(
                         {
                             "type": "tool_result",
@@ -135,21 +155,18 @@ def run_agent(
                             "is_error": True,
                         }
                     )
-                    messages.append({"role": "user", "content": results})
-                    break
-                results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "ok"})
-                messages.append({"role": "user", "content": results})
-                if settings.ops_trace_dir:
-                    write_agent_trace(
-                        settings.ops_trace_dir,
-                        question=question,
-                        model=model,
-                        diagnosis=diagnosis,
-                        steps=trace,
-                    )
-                if include_trace:
-                    return diagnosis, messages, trace
-                return diagnosis, messages
+                continue
+            # 本轮已下结论(或结论待修正)→ 不再执行后续工具,但仍回 tool_result 保持消息合法
+            # (否则遗留 tool_use 无对应 tool_result,下一轮 messages.create 会 400)。
+            if diagnosis is not None or report_pending:
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "content": "本轮已提交诊断结论,跳过该工具调用。",
+                    }
+                )
+                continue
             # 危险工具:执行前过审批闸(HITL)
             approved: bool | None = None
             if tu.name in DANGEROUS_TOOLS:
@@ -206,7 +223,21 @@ def run_agent(
                 )
             )
             results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(output)})
+        # 每轮只 append 一次(修正旧实现 report 分支 + 循环尾的双 append)。
         messages.append({"role": "user", "content": results})
+        if diagnosis is not None:
+            if settings.ops_trace_dir:
+                write_agent_trace(
+                    settings.ops_trace_dir,
+                    question=question,
+                    model=model,
+                    diagnosis=diagnosis,
+                    steps=trace,
+                    usage={"input_tokens": total_in, "output_tokens": total_out},
+                )
+            if include_trace:
+                return diagnosis, messages, trace
+            return diagnosis, messages
 
     raise RuntimeError(f"达到 max_steps={max_steps} 仍未得出结论(可能在绕圈,检查工具/prompt)")
 

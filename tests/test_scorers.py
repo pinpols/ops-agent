@@ -55,7 +55,7 @@ class DeterministicScoreTest(unittest.TestCase):
 
 
 class LlmJudgeTest(unittest.TestCase):
-    @patch("anthropic.Anthropic")
+    @patch("ops_agent.llm.Anthropic")
     def test_parses_verdict(self, anthropic_cls):
         block = SimpleNamespace(
             type="tool_use",

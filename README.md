@@ -115,10 +115,25 @@ schema 返回 → Pydantic 校验成对象。**概念详解见 [`docs/phase1-con
 
 ```
 ops_agent/
-  models.py     # Pydantic 输出 schema(诊断结果的"目标形状")
-  diagnose.py   # 阶段 1:日志→结构化诊断(function calling + 结构化解析)
-docs/           # 概念笔记(phase1-concepts.md)
-tests/          # 离线 mock 测试
-data/           # 样本日志
-evals/          # 阶段 4:测试集 + 评测(待建)
+  models.py        # Pydantic 输出 schema(诊断结果的"目标形状")
+  config.py        # Settings:profile/安全闸/路径,统一从 env 读(含 profile 校验)
+  llm.py           # 共享 Anthropic 客户端工厂(集中重试配置)
+  diagnose.py      # 阶段 1:日志→结构化诊断(function calling + 结构化解析)
+  investigate.py   # 阶段 2:单工具回合(模型自取 read_logs 再下结论)
+  agent.py         # 阶段 3:多步 agent(手写循环 + 多工具 + 记忆 + HITL)
+  graph_agent.py   # 阶段 3b:同 agent 的 LangGraph 版(对照学)
+  tools.py         # read_logs / query_pg / query_pg_template(只读取证)
+  system_tools.py  # list_services / tail_recent_errors / inspect_compose / read_app_config
+  exec_tools.py    # 阶段 5:restart_service(危险写操作,白名单 + 审批闸 + dry-run)
+  sql_templates.py # prod 下允许的只读 SQL 模板
+  redaction.py     # 脱敏(token/DSN 口令/AWS key/JWT/邮箱/手机号)
+  audit.py         # 审批 / 执行审计记录(JSONL)
+  trace_io.py      # agent trace 落盘(JSONL)
+  bundle.py        # 诊断包(diagnosis.json + trace.jsonl + evidence.log + summary.md)
+  obs.py           # 可选 Langfuse 接线(未配则 no-op)
+  cli.py           # ops-agent 命令行入口
+docs/              # 概念笔记(phase1~5-concepts.md)
+tests/             # 离线 mock 测试(无需 key)
+data/              # 样本日志
+evals/             # 阶段 4:测试集 + 确定性/LLM-judge 评测(已实现:ops-agent eval)
 ```
