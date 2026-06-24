@@ -44,6 +44,12 @@ def _apply_target_arg(args: argparse.Namespace) -> None:
 
 
 def _require_api_key() -> None:
+    from ops_agent.llm import gateway_enabled
+
+    # 网关模式:LLM provider key 由 agent_ctl 网关侧按 catalog 管理(可用 deepseek/openai/glm 等),
+    # 不再强制 ANTHROPIC_API_KEY,避免单依赖。
+    if gateway_enabled():
+        return
     if not get_settings().anthropic_api_key:
         print("缺 ANTHROPIC_API_KEY,先 cp .env.example .env 并填 key", file=sys.stderr)
         raise SystemExit(2)

@@ -43,22 +43,26 @@ def gateway_enabled() -> bool:
 
 
 def build_gateway_client() -> Any:
-    """OPS_USE_GATEWAY=true 时构造 agentctl 库形态 client。延迟 import,不开则不依赖 agentctl。"""
-    import anthropic
+    """OPS_USE_GATEWAY=true 时构造 agent_ctl 库形态 client。延迟 import,不开则不依赖 agent_ctl。
 
-    # 兼容包名过渡:项目从 agentctl 改名为 agent_ctl(import 包),两名都试,谁在装用谁。
-    try:
-        from agent_ctl.client.gateway_client import GatewayClient
-        from agent_ctl.config import load_config
-        from agent_ctl.providers.anthropic_provider import AnthropicProvider
-    except ModuleNotFoundError:
-        from agentctl.client.gateway_client import GatewayClient
-        from agentctl.config import load_config
-        from agentctl.providers.anthropic_provider import AnthropicProvider
+    **provider 可配置、不单依赖 Anthropic**:按目录(catalog)从环境里有 key 的 provider 构建
+    (anthropic/openai/deepseek/qwen/glm);走哪家由 AGENT_CTL_CONFIG 的路由/别名决定(shim 用
+    'default' 路由)。工具调用经 agent_ctl 的 Anthropic↔OpenAI 互译,在任意 provider 上都可用。
+    没配任何 catalog key 时,退回原生 Anthropic(向后兼容)。
+    """
+    from agent_ctl.client.gateway_client import GatewayClient
+    from agent_ctl.config import load_config
+    from agent_ctl.providers.catalog import build_providers
 
     cfg = load_config(os.getenv("AGENT_CTL_CONFIG"))
-    native = anthropic.Anthropic(max_retries=get_settings().anthropic_max_retries)
-    providers = {"anthropic": AnthropicProvider(native)}
+    providers = build_providers()
+    if not providers:
+        import anthropic
+
+        from agent_ctl.providers.anthropic_provider import AnthropicProvider
+
+        native = anthropic.Anthropic(max_retries=get_settings().anthropic_max_retries)
+        providers = {"anthropic": AnthropicProvider(native)}
     return GatewayClient.from_config(cfg, providers)
 
 
