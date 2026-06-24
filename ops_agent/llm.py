@@ -30,7 +30,11 @@ class LLMClient(Protocol):
 def make_client() -> LLMClient:
     """构造 LLM 客户端:默认原生 Anthropic;``OPS_USE_GATEWAY=true`` 时走 agentctl 网关 shim。"""
     if gateway_enabled():
-        return _GatewayAnthropicShim(build_gateway_client())
+        # 网关按**逻辑路由名**(routes 的键,如 default)选目标 + 回退,不是具体模型名;
+        # ops-agent 调用方传的是具体模型(claude-sonnet-4-6),故 shim 统一改用路由名,
+        # 由网关 config 的 routes 决定实际模型链(OPS_GATEWAY_ROUTE 可配,默认 default)。
+        route = os.getenv("OPS_GATEWAY_ROUTE", "default")
+        return _GatewayAnthropicShim(build_gateway_client(), route)
     return Anthropic(max_retries=get_settings().anthropic_max_retries)
 
 
@@ -89,8 +93,9 @@ def reconstruct_response(normalized: Any) -> SimpleNamespace:
 class _GatewayMessages:
     """``client.messages`` shim:原生 ``create(**kwargs)`` → 网关 ``messages(...)`` → 还原响应。"""
 
-    def __init__(self, gateway: Any) -> None:
+    def __init__(self, gateway: Any, route: str) -> None:
         self._gateway = gateway
+        self._route = route
 
     def create(
         self,
@@ -104,9 +109,10 @@ class _GatewayMessages:
         temperature: float | None = None,
         **_ignored: Any,
     ) -> SimpleNamespace:
+        # 用逻辑路由名(非传入的具体模型名 model)调网关:网关据 routes 解析实际模型链 + 回退。
         # cache_control 等原生特性经 **_ignored 吞掉(网关层不透传,缓存由网关自管),不报错。
         normalized = self._gateway.messages(
-            model=model,
+            model=self._route,
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -120,5 +126,5 @@ class _GatewayMessages:
 class _GatewayAnthropicShim:
     """``.messages.create(...)`` 兼容门面,内部走 agentctl 网关。"""
 
-    def __init__(self, gateway: Any) -> None:
-        self.messages = _GatewayMessages(gateway)
+    def __init__(self, gateway: Any, route: str = "default") -> None:
+        self.messages = _GatewayMessages(gateway, route)
