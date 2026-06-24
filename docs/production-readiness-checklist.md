@@ -50,8 +50,12 @@
 
 ## 8. 状态与数据
 - ✅ trace/bundle/metrics/审批日志路径全可配,容器以可写卷挂载
+- ✅ **诊断历史持久层**(`history.py`,SQLite):每次诊断落库(脱敏入库)、可按 target/severity/时间查询、
+  **留存双闸**(`OPS_HISTORY_RETENTION_DAYS` 时间 + `OPS_HISTORY_MAX_ROWS` 行数,`history-prune` 可 cron)、
+  一键导出 JSON。默认关(未配 `OPS_HISTORY_DB`=不落库,零回归)。与 `audit.py` 哈希链安全审计边界分离。
 - ◑ graph 交互模式 checkpointer 当前内存态(MemorySaver);多轮会话持久化(Sqlite/PG saver)是后续项
   —— 注:T1 触发诊断走 `run_agent`(无状态单发),不依赖 checkpointer
+- ☐ 企业级中心化存储(PG/对象存储)+ 数据驻留/导出合规:SQLite 是单机基线,跨实例聚合是 T2 后续
 
 ## 9. 测试深度
 - ✅ 145 测试 / 覆盖 80%(coverage gate 70%);新模块均带单测 + serve 端到端起真 HTTP
