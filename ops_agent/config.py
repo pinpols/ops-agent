@@ -76,6 +76,10 @@ class Settings:
     ops_max_run_seconds: float = 120.0
     ops_max_run_tokens: int = 200_000
     ops_metrics_file: Path | None = None
+    # 诊断历史持久层(可查询 + 留存);未配 db 路径=关闭,不落库(零回归)。
+    ops_history_db: Path | None = None
+    ops_history_retention_days: int = 90
+    ops_history_max_rows: int = 100_000
 
     @property
     def langfuse_enabled(self) -> bool:
@@ -146,6 +150,13 @@ class Settings:
                 if os.environ.get("OPS_METRICS_FILE")
                 else None
             ),
+            ops_history_db=(
+                Path(os.environ["OPS_HISTORY_DB"]).resolve()
+                if os.environ.get("OPS_HISTORY_DB")
+                else None
+            ),
+            ops_history_retention_days=int(os.environ.get("OPS_HISTORY_RETENTION_DAYS", "90")),
+            ops_history_max_rows=int(os.environ.get("OPS_HISTORY_MAX_ROWS", "100000")),
         )
 
 

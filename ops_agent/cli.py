@@ -144,6 +144,50 @@ def _cmd_app_config(args: argparse.Namespace) -> None:
     print(read_app_config(args.service, args.max_chars))
 
 
+def _history_store_or_exit():
+    from ops_agent.history import DiagnosisStore
+
+    load_dotenv()
+    db = get_settings().ops_history_db
+    if not db:
+        print("未配 OPS_HISTORY_DB:诊断历史持久层未启用。", file=sys.stderr)
+        raise SystemExit(2)
+    return DiagnosisStore(db)
+
+
+def _cmd_history(args: argparse.Namespace) -> None:
+    import json as _json
+
+    store = _history_store_or_exit()
+    try:
+        if args.export:
+            n = store.export(Path(args.export))
+            print(f"已导出 {n} 条 → {args.export}")
+            return
+        rows = store.query(target=args.target, severity=args.severity, limit=args.limit)
+        print(_json.dumps(rows, ensure_ascii=False, indent=2))
+    finally:
+        store.close()
+
+
+def _cmd_history_prune(args: argparse.Namespace) -> None:
+    store = _history_store_or_exit()
+    try:
+        settings = get_settings()
+        days = (
+            args.retention_days
+            if args.retention_days is not None
+            else (settings.ops_history_retention_days)
+        )
+        max_rows = args.max_rows if args.max_rows is not None else settings.ops_history_max_rows
+        deleted = store.prune(days, max_rows)
+        print(
+            f"已清理 {deleted} 条(retention_days={days}, max_rows={max_rows});剩余 {store.count()}"
+        )
+    finally:
+        store.close()
+
+
 def _cmd_serve(args: argparse.Namespace) -> None:
     from ops_agent.server import serve
 
@@ -309,6 +353,18 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="0.0.0.0", help="监听地址(默认 0.0.0.0)")  # noqa: S104
     serve.add_argument("--port", type=int, default=8080, help="监听端口(默认 8080)")
     serve.set_defaults(func=_cmd_serve)
+
+    history = sub.add_parser("history", help="查询/导出诊断历史(需 OPS_HISTORY_DB)")
+    history.add_argument("--target", help="按目标系统过滤")
+    history.add_argument("--severity", help="按严重级别过滤(INFO/WARNING/CRITICAL)")
+    history.add_argument("--limit", type=int, default=50, help="返回条数(默认 50)")
+    history.add_argument("--export", metavar="FILE", help="导出全部记录为 JSON 到该文件")
+    history.set_defaults(func=_cmd_history)
+
+    prune = sub.add_parser("history-prune", help="按留存策略清理诊断历史(可 cron)")
+    prune.add_argument("--retention-days", type=int, help="删早于 N 天(默认取配置)")
+    prune.add_argument("--max-rows", type=int, help="总量上限,超出删最旧(默认取配置)")
+    prune.set_defaults(func=_cmd_history_prune)
 
     return parser
 

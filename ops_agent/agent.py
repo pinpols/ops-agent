@@ -259,6 +259,7 @@ def run_agent(
                     usage={"input_tokens": total_in, "output_tokens": total_out},
                     prompt_version=PROMPT_VERSION,
                 )
+            _record_history(settings, question, model, diagnosis, total_in, total_out)
             if include_trace:
                 return diagnosis, messages, trace
             return diagnosis, messages
@@ -272,6 +273,46 @@ def _flush_metrics(settings: Settings) -> None:
     """配了 OPS_METRICS_FILE 就把累计指标原子写成 Prometheus textfile(否则只留进程内)。"""
     if settings.ops_metrics_file:
         METRICS.write_textfile(settings.ops_metrics_file)
+
+
+def _record_history(
+    settings: Settings,
+    question: str,
+    model: str,
+    diagnosis: Diagnosis,
+    total_in: int,
+    total_out: int,
+) -> None:
+    """配了 OPS_HISTORY_DB 就把本次诊断落历史库(可查询 + 留存);未配=no-op,零回归。
+
+    落库失败绝不冒泡打断诊断主链路(历史是旁路观测,坏了不该影响出结论)。
+    """
+    if not settings.ops_history_db:
+        return
+    try:
+        from ops_agent.history import DiagnosisRun, DiagnosisStore
+
+        store = DiagnosisStore(settings.ops_history_db)
+        try:
+            store.record(
+                DiagnosisRun(
+                    severity=diagnosis.severity.value,
+                    summary=diagnosis.summary,
+                    root_cause=diagnosis.root_cause,
+                    confidence=diagnosis.confidence,
+                    question=question,
+                    model=model,
+                    prompt_version=PROMPT_VERSION,
+                    input_tokens=total_in,
+                    output_tokens=total_out,
+                )
+            )
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001 - 历史落库是旁路,失败只 warn 不打断诊断
+        import logging
+
+        logging.getLogger("ops_agent.history").warning("诊断历史落库失败(忽略): %s", exc)
 
 
 def _print(d: Diagnosis) -> None:
