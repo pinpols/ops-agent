@@ -99,6 +99,10 @@ def _cmd_eval(args: argparse.Namespace) -> None:
         sys.argv.extend(["--save", args.save])
     if args.baseline:
         sys.argv.extend(["--baseline", args.baseline])
+    if args.fail_under is not None:
+        sys.argv.extend(["--fail-under", str(args.fail_under)])
+    if args.fail_on_regression:
+        sys.argv.append("--fail-on-regression")
     eval_main()
 
 
@@ -138,6 +142,21 @@ def _cmd_app_config(args: argparse.Namespace) -> None:
 
     _apply_target_arg(args)
     print(read_app_config(args.service, args.max_chars))
+
+
+def _cmd_serve(args: argparse.Namespace) -> None:
+    from ops_agent.server import serve
+
+    load_dotenv()
+    _require_api_key()
+    settings = get_settings()
+    if not settings.ops_webhook_token:
+        print(
+            "缺 OPS_WEBHOOK_TOKEN:/diagnose 要求鉴权,未配则 fail-closed"
+            "(只放行 /healthz、/metrics)。",
+            file=sys.stderr,
+        )
+    serve(host=args.host, port=args.port)
 
 
 def _cmd_doctor(args: argparse.Namespace) -> None:
@@ -236,6 +255,12 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmd.add_argument("--judge", action="store_true", help="启用 LLM-as-judge")
     eval_cmd.add_argument("--save", metavar="FILE", help="把本次结果存为基线 JSON")
     eval_cmd.add_argument("--baseline", metavar="FILE", help="与基线对比升降")
+    eval_cmd.add_argument(
+        "--fail-under", type=float, metavar="RATE", help="通过率低于阈值则非零退出"
+    )
+    eval_cmd.add_argument(
+        "--fail-on-regression", action="store_true", help="配合 --baseline:有回归则非零退出"
+    )
     eval_cmd.set_defaults(func=_cmd_eval)
 
     bundle = sub.add_parser("bundle", help="运行诊断并输出 diagnosis/trace/evidence/summary 包")
@@ -266,6 +291,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="检查关键配置")
     doctor.add_argument("--target", help="目标系统根目录或名称,如 file-batch-system")
     doctor.set_defaults(func=_cmd_doctor)
+
+    serve = sub.add_parser("serve", help="启动 HTTP 触发服务(/healthz /metrics /diagnose)")
+    serve.add_argument("--host", default="0.0.0.0", help="监听地址(默认 0.0.0.0)")  # noqa: S104
+    serve.add_argument("--port", type=int, default=8080, help="监听端口(默认 8080)")
+    serve.set_defaults(func=_cmd_serve)
 
     return parser
 

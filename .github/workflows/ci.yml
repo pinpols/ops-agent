@@ -65,11 +65,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,graph]"
-      - name: Eval regression (确定性打分;无 key 则跳过)
+      - name: Eval regression gate (确定性打分;有 key 则硬闸卡回归)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "no ANTHROPIC_API_KEY secret configured — skipping eval"; exit 0
           fi
-          ops-agent eval
+          # 硬闸:确定性通过率低于阈值即 fail(防改 prompt/换模型静默回归)。
+          # 阈值保守(0.6),随基线提升再上调;改 prompt 须同步 bump prompts.PROMPT_VERSION。
+          ops-agent eval --fail-under 0.6
