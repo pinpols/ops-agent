@@ -70,9 +70,9 @@ def test_shim_create_forwards_system_tool_choice_and_ignores_native_extras():
                 }
             )
 
-    shim = llm._GatewayAnthropicShim(FakeGateway())
+    shim = llm._GatewayAnthropicShim(FakeGateway(), route="default")
     resp = shim.messages.create(
-        model="claude-x",
+        model="claude-sonnet-4-6",  # 具体模型名
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=64,
         system="你是 SRE",
@@ -80,8 +80,25 @@ def test_shim_create_forwards_system_tool_choice_and_ignores_native_extras():
         tool_choice={"type": "tool", "name": "report"},
         cache_control={"type": "ephemeral"},  # 原生专属,应被 shim 吞掉不报错
     )
+    # 关键:传给网关的是**逻辑路由名**(default),不是具体模型名 —— 否则 router KeyError。
+    assert captured["model"] == "default"
     assert captured["system"] == "你是 SRE"
     assert captured["tool_choice"] == {"type": "tool", "name": "report"}
     assert captured["tools"] == [{"name": "report"}]
     assert "cache_control" not in captured
     assert resp.content[0].text == "ok"
+
+
+def test_shim_routes_by_logical_name_not_concrete_model():
+    """回归:gateway 按 routes 键解析,shim 必须发路由名而非具体模型名。"""
+    seen = {}
+
+    class FakeGateway:
+        def messages(self, **kwargs):
+            seen["model"] = kwargs["model"]
+            return SimpleNamespace(raw={"content": [], "stop_reason": "end_turn", "usage": {}})
+
+    llm._GatewayAnthropicShim(FakeGateway(), route="prod-pool").messages.create(
+        model="claude-opus-4-8", messages=[], max_tokens=16
+    )
+    assert seen["model"] == "prod-pool"
