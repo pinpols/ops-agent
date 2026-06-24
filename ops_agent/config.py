@@ -34,6 +34,21 @@ def _env_csv(name: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
+def _env_or_file(name: str) -> str | None:
+    """读敏感值:优先 env `NAME`,否则读 `NAME_FILE` 指向的文件内容(去尾换行)。
+
+    `*_FILE` 是 docker/k8s secret 注入的标准做法 —— 密钥落文件挂进容器,不进环境变量/进程表/日志。
+    """
+    direct = os.environ.get(name)
+    if direct:
+        return direct
+    file_path = os.environ.get(f"{name}_FILE")
+    if file_path:
+        content = Path(file_path).read_text(encoding="utf-8").strip()
+        return content or None
+    return None
+
+
 @dataclass(frozen=True)
 class Settings:
     ops_profile: str
@@ -55,6 +70,11 @@ class Settings:
     ops_redact_artifacts: bool
     langfuse_public_key: str | None
     langfuse_secret_key: str | None
+    # T1 生产化:webhook 触发鉴权 + run 预算闸 + 自身指标 textfile
+    ops_webhook_token: str | None = field(default=None, repr=False)
+    ops_max_run_seconds: float = 120.0
+    ops_max_run_tokens: int = 200_000
+    ops_metrics_file: Path | None = None
 
     @property
     def langfuse_enabled(self) -> bool:
@@ -92,7 +112,7 @@ class Settings:
         trace_dir = os.environ.get("OPS_TRACE_DIR")
         return cls(
             ops_profile=profile,
-            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            anthropic_api_key=_env_or_file("ANTHROPIC_API_KEY"),
             anthropic_model=model,
             anthropic_judge_model=os.environ.get("ANTHROPIC_JUDGE_MODEL", model),
             anthropic_max_retries=int(os.environ.get("OPS_LLM_MAX_RETRIES", "4")),
@@ -100,7 +120,7 @@ class Settings:
             ops_log_dir=resolved_log_dir,
             ops_trace_dir=Path(trace_dir).resolve() if trace_dir else None,
             ops_bundle_dir=Path(os.environ.get("OPS_BUNDLE_DIR", DEFAULT_BUNDLE_DIR)).resolve(),
-            ops_pg_dsn=os.environ.get("OPS_PG_DSN"),
+            ops_pg_dsn=_env_or_file("OPS_PG_DSN"),
             ops_sql_allow_free=_env_bool("OPS_SQL_ALLOW_FREE", default=profile != "prod"),
             ops_allow_exec=_env_bool("OPS_ALLOW_EXEC"),
             ops_prod_allow_exec=_env_bool("OPS_PROD_ALLOW_EXEC"),
@@ -112,6 +132,14 @@ class Settings:
             ops_redact_artifacts=_env_bool("OPS_REDACT_ARTIFACTS", default=True),
             langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
             langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
+            ops_webhook_token=_env_or_file("OPS_WEBHOOK_TOKEN"),
+            ops_max_run_seconds=float(os.environ.get("OPS_MAX_RUN_SECONDS", "120")),
+            ops_max_run_tokens=int(os.environ.get("OPS_MAX_RUN_TOKENS", "200000")),
+            ops_metrics_file=(
+                Path(os.environ["OPS_METRICS_FILE"]).resolve()
+                if os.environ.get("OPS_METRICS_FILE")
+                else None
+            ),
         )
 
 

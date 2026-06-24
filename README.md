@@ -106,6 +106,29 @@ DSN 密码、邮箱和手机号。`ops-agent doctor` 会检查生产 profile 下
 schema 返回 → Pydantic 校验成对象。**概念详解见 [`docs/phase1-concepts.md`](docs/phase1-concepts.md)**
 (function calling 怎么工作、为什么 Field description 影响输出)。
 
+## T1 触发服务(serve / Docker / 多目标)
+
+把 CLI 变成能接告警/被调度的**只读诊断服务**(就绪清单见
+[`docs/production-readiness-checklist.md`](docs/production-readiness-checklist.md))。
+
+```bash
+export OPS_WEBHOOK_TOKEN=$(openssl rand -hex 16)   # /diagnose 鉴权;未配则 fail-closed
+ops-agent serve --port 8080          # GET /healthz、GET /metrics、POST /diagnose
+
+curl localhost:8080/healthz                          # {"status":"ok",...}
+curl -H "Authorization: Bearer $OPS_WEBHOOK_TOKEN" \
+     -d '{"question":"worker-import 为什么失败?","target":"file-batch-system"}' \
+     localhost:8080/diagnose          # 只读诊断(模型即便想 restart 也被全拒)
+```
+
+- **多目标**:`cp targets.toml.example targets.toml` 配 `root/log_dir/pg_dsn/metrics_url`,
+  `--target <name>` 或 webhook `{"target": "..."}` 选用;不配则回退单目标 env。
+- **指标**:`query_metrics` 只读查 Prometheus;agent 自身指标走 `/metrics` 或 `OPS_METRICS_FILE`。
+- **预算闸**:`OPS_MAX_RUN_SECONDS` / `OPS_MAX_RUN_TOKENS` 防绕圈烧钱。
+- **密钥**:支持 `<NAME>_FILE`(docker/k8s secret)注入。
+- **Docker**:`docker build -t ops-agent . && docker run -p 8080:8080 --env-file .env ops-agent`
+  (非 root + HEALTHCHECK)。
+
 ## 模型来源
 
 默认用 **Anthropic API**(模型强,学概念时不被"是我错还是模型笨"干扰)。
@@ -122,17 +145,24 @@ ops_agent/
   investigate.py   # 阶段 2:单工具回合(模型自取 read_logs 再下结论)
   agent.py         # 阶段 3:多步 agent(手写循环 + 多工具 + 记忆 + HITL)
   graph_agent.py   # 阶段 3b:同 agent 的 LangGraph 版(对照学)
+  prompts.py       # 版本化系统 prompt + 不可信围栏(prompt 注入纵深)
   tools.py         # read_logs / query_pg / query_pg_template(只读取证)
   system_tools.py  # list_services / tail_recent_errors / inspect_compose / read_app_config
+  metrics_tools.py # query_metrics(只读 Prometheus instant 查询)
   exec_tools.py    # 阶段 5:restart_service(危险写操作,白名单 + 审批闸 + dry-run)
   sql_templates.py # prod 下允许的只读 SQL 模板
   redaction.py     # 脱敏(token/DSN 口令/AWS key/JWT/邮箱/手机号)
-  audit.py         # 审批 / 执行审计记录(JSONL)
-  trace_io.py      # agent trace 落盘(JSONL)
+  audit.py         # 审批 / 执行审计记录(JSONL,按大小滚动留存)
+  trace_io.py      # agent trace 落盘(JSONL,含 prompt_version)
   bundle.py        # 诊断包(diagnosis.json + trace.jsonl + evidence.log + summary.md)
   obs.py           # 可选 Langfuse 接线(未配则 no-op)
+  # ── T1 生产化 ──
+  targets.py       # 多目标注册表(name → root/log_dir/pg_dsn/metrics_url)
+  budget.py        # RunBudget 预算闸(墙钟 + token,防绕圈烧钱)
+  metrics.py       # agent 自身指标(Prometheus textfile / /metrics)
+  server.py        # ops-agent serve:/healthz /metrics /diagnose(只读 webhook)
   cli.py           # ops-agent 命令行入口
-docs/              # 概念笔记(phase1~5-concepts.md)
+docs/              # 概念笔记(phase1~5)+ 生产就绪清单(production-readiness-checklist.md)
 tests/             # 离线 mock 测试(无需 key)
 data/              # 样本日志
 evals/             # 阶段 4:测试集 + 确定性/LLM-judge 评测(已实现:ops-agent eval)

@@ -21,3 +21,7 @@ htmlcov/
 
 # macOS
 .DS_Store
+
+# 真实多目标注册表(含连接串)+ 指标 textfile —— 只提交 *.example
+targets.toml
+*.prom
