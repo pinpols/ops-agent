@@ -15,6 +15,7 @@
 import hmac
 import json
 import logging
+import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -59,10 +60,11 @@ def handle_diagnose(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         diagnosis = run_agent(q, approver=_deny_all_approver)[0]
     except BudgetExceeded as e:
         return 503, {"error": "budget_exceeded", "detail": str(e)}
-    except Exception as e:  # noqa: BLE001 - webhook 边界,任何异常转 500 而非崩进程
+    except Exception:  # noqa: BLE001 - webhook 边界,任何异常转 500 而非崩进程
         METRICS.inc("webhook_error_total")
+        # 完整异常(可能含路径/DSN 等内部细节)只进服务端日志;响应仅给类别,不回泄内部信息。
         logger.exception("diagnose 失败")
-        return 500, {"error": "internal_error", "detail": f"{type(e).__name__}: {e}"}
+        return 500, {"error": "internal_error"}
     return 200, {"diagnosis": diagnosis.model_dump(mode="json")}
 
 
@@ -98,12 +100,20 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/diagnose":
             self._send(404, {"error": "not_found"})
             return
-        if not authorize(self.headers.get("Authorization"), get_settings().ops_webhook_token):
+        # token 在 serve() 启动时快照到 server 上(一致 + 避免每请求重读密钥文件);
+        # 直接构造 server(测试)时无该属性 → None → fail-closed。
+        expected = getattr(self.server, "expected_token", None)
+        if not authorize(self.headers.get("Authorization"), expected):
             METRICS.inc("webhook_unauthorized_total")
             self._send(401, {"error": "unauthorized"})
             return
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        if length > _MAX_BODY_BYTES:
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            self._send(400, {"error": "invalid_content_length"})
+            return
+        # 负数(伪造头)会让 rfile.read(-1) 读到 EOF/挂死;非法或超限一律拒。
+        if length < 0 or length > _MAX_BODY_BYTES:
             self._send(413, {"error": "payload_too_large"})
             return
         try:
@@ -120,14 +130,22 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "0.0.0.0", port: int = 8080) -> None:  # noqa: S104 - 容器内监听 0.0.0.0
-    """启动阻塞式 HTTP 服务,Ctrl-C / SIGTERM 优雅退出。"""
+    """启动阻塞式 HTTP 服务,SIGINT / SIGTERM 均优雅退出(容器 docker stop / k8s 驱逐发 SIGTERM)。"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     httpd = ThreadingHTTPServer((host, port), _Handler)
+    # 鉴权 token 启动时快照一次:一致(密钥轮换不会让并发请求读到半新半旧)+ 避免每请求重读密钥文件。
+    httpd.expected_token = get_settings().ops_webhook_token  # type: ignore[attr-defined]
+    # SIGTERM(docker stop / k8s)默认直接终止、不跑 finally;转成 KeyboardInterrupt 走优雅退出。
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     logger.info("ops-agent serve on %s:%d (version=%s)", host, port, __version__)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        logger.info("收到中断,优雅退出")
+        logger.info("收到停止信号,优雅退出")
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def _raise_keyboard_interrupt(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt

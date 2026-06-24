@@ -42,6 +42,20 @@ class TargetsTest(unittest.TestCase):
                 targets.resolve_target("nope")
         self.assertIn("nope", str(ctx.exception))
 
+    def test_non_http_metrics_url_rejected_at_load(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "targets.toml"
+            path.write_text(
+                '[targets.x]\nlog_dir = "/var/log/x"\nmetrics_url = "file:///etc/passwd"\n',
+                encoding="utf-8",
+            )
+            with (
+                patch.dict("os.environ", {"OPS_TARGETS_FILE": str(path)}, clear=False),
+                self.assertRaises(ValueError) as ctx,
+            ):
+                targets.load_targets()
+        self.assertIn("http", str(ctx.exception))
+
     def test_missing_log_dir_in_registry_raises(self):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "targets.toml"

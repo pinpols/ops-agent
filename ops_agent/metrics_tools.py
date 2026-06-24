@@ -29,10 +29,11 @@ def query_metrics_result(promql: str, target: str | None = None) -> ToolResult:
         return ToolResult.failure(
             "[query_metrics] 该 target 未配置 metrics_url(OPS_METRICS_URL 或 targets.toml)"
         )
-    url = base.rstrip("/") + _QUERY_PATH + "?" + urllib.parse.urlencode({"query": promql})
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})  # noqa: S310 - http(s) only below
-    if not url.startswith(("http://", "https://")):
+    # scheme 校验在构建/打开请求**之前**:杜绝 file://、ftp:// 等非 http(s) 被 urlopen。
+    if not base.startswith(("http://", "https://")):
         return ToolResult.failure("[query_metrics] metrics_url 必须是 http(s)")
+    url = base.rstrip("/") + _QUERY_PATH + "?" + urllib.parse.urlencode({"query": promql})
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})  # noqa: S310 - 已校验 http(s)
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:  # noqa: S310 - 已校验 scheme
             payload = json.loads(resp.read().decode("utf-8"))

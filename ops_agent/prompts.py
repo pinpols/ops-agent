@@ -30,5 +30,10 @@ AGENT_SYSTEM = (
 
 
 def fence_untrusted(text: str) -> str:
-    """把工具输出包进不可信围栏后再喂回 LLM —— 让模型在结构上区分'数据'与'指令'。"""
-    return f"{UNTRUSTED_OPEN}\n{text}\n{UNTRUSTED_CLOSE}"
+    """把工具输出包进不可信围栏后再喂回 LLM —— 让模型在结构上区分'数据'与'指令'。
+
+    **防围栏逃逸**:攻击者可控的日志内容若混入围栏闭标记,模型可能误判'数据段结束'、把后续
+    注入文字当指令。喂入前把文本里出现的开/闭标记中和掉(替换成可见占位),确保围栏不可被内容破坏。
+    """
+    safe = text.replace(UNTRUSTED_CLOSE, "U_T_O_>>>").replace(UNTRUSTED_OPEN, "<<<_U_T_O")
+    return f"{UNTRUSTED_OPEN}\n{safe}\n{UNTRUSTED_CLOSE}"

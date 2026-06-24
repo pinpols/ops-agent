@@ -100,17 +100,26 @@ class HttpEndToEndTest(unittest.TestCase):
         status, body = self._get("/metrics")
         self.assertEqual(status, 200)
 
-    def test_diagnose_unauthorized_when_no_token(self):
+    def _post(self, body: bytes, token: str | None = None):
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
         req = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}/diagnose",
-            data=b'{"question":"x"}',
-            method="POST",
+            f"http://127.0.0.1:{self.port}/diagnose", data=body, method="POST", headers=headers
         )
-        with patch("ops_agent.server.get_settings") as gs:
-            gs.return_value.ops_webhook_token = None  # fail-closed
-            with self.assertRaises(urllib.error.HTTPError) as ctx:
-                urllib.request.urlopen(req, timeout=5)
+        return urllib.request.urlopen(req, timeout=5)
+
+    def test_diagnose_unauthorized_when_no_token(self):
+        # server 未设 expected_token(setUp 直接构造)→ fail-closed,任何请求 401
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._post(b'{"question":"x"}', token="anything")
         self.assertEqual(ctx.exception.code, 401)
+
+    def test_diagnose_authorized_read_only_path(self):
+        self.httpd.expected_token = "secret"  # 模拟 serve() 启动快照
+        diag = _fake_diagnosis()
+        with patch("ops_agent.agent.run_agent", return_value=(diag, [])):
+            resp = self._post(b'{"question":"\xe6\x85\xa2"}', token="secret")
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(json.loads(resp.read())["diagnosis"]["severity"], "WARNING")
 
 
 if __name__ == "__main__":

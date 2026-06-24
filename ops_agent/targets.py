@@ -44,12 +44,16 @@ def load_targets() -> dict[str, Target]:
     for name, cfg in (data.get("targets") or {}).items():
         if "log_dir" not in cfg:
             raise ValueError(f"target {name!r} 缺 log_dir")
+        metrics_url = cfg.get("metrics_url")
+        # 配置期就拒非 http(s) metrics_url(防 file://、ftp:// 经 query_metrics 触发 SSRF/本地读)。
+        if metrics_url and not str(metrics_url).startswith(("http://", "https://")):
+            raise ValueError(f"target {name!r} 的 metrics_url 必须是 http(s):{metrics_url!r}")
         out[name] = Target(
             name=name,
             root=Path(cfg["root"]).resolve() if cfg.get("root") else None,
             log_dir=Path(cfg["log_dir"]).resolve(),
             pg_dsn=cfg.get("pg_dsn"),
-            metrics_url=cfg.get("metrics_url"),
+            metrics_url=metrics_url,
         )
     return out
 

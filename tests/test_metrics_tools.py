@@ -38,6 +38,17 @@ class QueryMetricsTest(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertIn("metrics_url", r.error)
 
+    def test_non_http_base_rejected_before_open(self):
+        evil = Target(name="t", root=None, log_dir="/x", metrics_url="file:///etc/passwd")  # type: ignore[arg-type]
+        with (
+            patch("ops_agent.metrics_tools.resolve_target", return_value=evil),
+            patch("ops_agent.metrics_tools.urllib.request.urlopen") as urlopen,
+        ):
+            r = query_metrics_result("up")
+        self.assertFalse(r.ok)
+        self.assertIn("http(s)", r.error)
+        urlopen.assert_not_called()  # 校验在 open 之前,绝不发起请求
+
     def test_success_parses_series(self):
         payload = {
             "status": "success",
