@@ -65,6 +65,10 @@ class ProfileValidationTest(unittest.TestCase):
             ):
                 Settings.from_env()
 
+    def test_redaction_rules_file_is_resolved(self):
+        with patch.dict(os.environ, {"OPS_REDACTION_RULES_FILE": "rules.json"}, clear=True):
+            self.assertEqual(Settings.from_env().ops_redaction_rules_file.name, "rules.json")
+
 
 if __name__ == "__main__":
     unittest.main()

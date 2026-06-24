@@ -1,5 +1,6 @@
 """Audit log helpers."""
 
+import hashlib
 import json
 import os
 import threading
@@ -29,13 +30,42 @@ def _rotate_if_large(path: Path) -> None:
         path.replace(path.with_name(path.name + ".1"))
 
 
+def _canonical_record(record: dict[str, Any]) -> bytes:
+    return json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+
+
+def _record_hash(record: dict[str, Any]) -> str:
+    return hashlib.sha256(_canonical_record(record)).hexdigest()
+
+
+def _last_hash(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    with path.open(encoding="utf-8") as f:
+        for line in reversed(f.read().splitlines()):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                return None
+            hash_value = value.get("hash")
+            return str(hash_value) if hash_value else None
+    return None
+
+
 def _write_record(path: Path, record: dict[str, Any]) -> None:
-    """滚动 + 追加一条记录,全程持锁(防并发竞态丢审计)。"""
+    """滚动 + 追加一条记录,全程持锁(防并发竞态丢审计),并写入 hash chain。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     with _AUDIT_LOCK:
         _rotate_if_large(path)
+        chained = redact(record)
+        chained["prev_hash"] = _last_hash(path)
+        chained["hash"] = _record_hash(chained)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(redact(record), ensure_ascii=False) + "\n")
+            f.write(json.dumps(chained, ensure_ascii=False) + "\n")
 
 
 def append_approval_record(

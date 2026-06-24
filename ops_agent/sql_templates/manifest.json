@@ -1,0 +1,22 @@
+{
+  "active_queries": {
+    "description": "List currently non-idle PostgreSQL sessions.",
+    "risk": "read-only",
+    "source": "pg_stat_activity"
+  },
+  "job_status_counts": {
+    "description": "Count batch job instances by status.",
+    "risk": "read-only",
+    "source": "batch.job_instance"
+  },
+  "pg_lock_waits": {
+    "description": "List PostgreSQL sessions waiting on locks.",
+    "risk": "read-only",
+    "source": "pg_stat_activity"
+  },
+  "recent_failed_jobs": {
+    "description": "List recent failed or errored batch job instances.",
+    "risk": "read-only",
+    "source": "batch.job_instance"
+  }
+}

@@ -8,17 +8,24 @@ python -m evals.run_eval --baseline base.json # 与基线对比,显示每条/总
 
 import argparse
 import json
+import subprocess
 import sys
+from datetime import UTC, datetime
+from typing import Any
 
 from dotenv import load_dotenv
 
 from evals.cases import CASES
 from evals.scorers import deterministic_score, llm_judge
+from ops_agent.config import get_settings
 from ops_agent.diagnose import diagnose_log  # 已 @observe:配了 Langfuse 则每条进 trace
+from ops_agent.prompts import PROMPT_VERSION
+
+EvalResults = dict[str, dict[str, Any]]
 
 
-def run(use_judge: bool) -> dict:
-    results = {}
+def run(use_judge: bool) -> EvalResults:
+    results: EvalResults = {}
     for c in CASES:
         d = diagnose_log(c.log_text)
         det = deterministic_score(d, c)
@@ -38,10 +45,48 @@ def run(use_judge: bool) -> dict:
     return results
 
 
-def _aggregate(results: dict) -> dict:
-    n = len(results)
-    passed = sum(1 for r in results.values() if r["passed"])
-    js = [r["judge_score"] for r in results.values() if "judge_score" in r]
+def _case_results(payload: dict[str, Any]) -> EvalResults:
+    if "results" in payload and isinstance(payload["results"], dict):
+        return payload["results"]
+    return payload
+
+
+def _git_sha() -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _metadata(*, use_judge: bool, case_count: int) -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "git_sha": _git_sha(),
+        "prompt_version": PROMPT_VERSION,
+        "model": settings.anthropic_model,
+        "judge_model": settings.anthropic_judge_model if use_judge else None,
+        "judge_enabled": use_judge,
+        "case_count": case_count,
+    }
+
+
+def _result_envelope(results: EvalResults, *, use_judge: bool) -> dict[str, Any]:
+    return {
+        "metadata": _metadata(use_judge=use_judge, case_count=len(results)),
+        "results": results,
+    }
+
+
+def _aggregate(results: dict[str, Any]) -> dict[str, Any]:
+    cases = _case_results(results)
+    n = len(cases)
+    passed = sum(1 for r in cases.values() if r["passed"])
+    js = [r["judge_score"] for r in cases.values() if "judge_score" in r]
     return {
         "pass_rate": round(passed / n, 3) if n else 0.0,
         "passed": passed,
@@ -92,7 +137,7 @@ def main() -> None:
 
     if args.baseline:
         with open(args.baseline, encoding="utf-8") as f:
-            base = json.load(f)
+            base = _case_results(json.load(f))
         base_agg = _aggregate(base)
         print("\n──── vs 基线 ────")
         print(f"通过率: {base_agg['pass_rate']:.0%} → {agg['pass_rate']:.0%}")
@@ -106,7 +151,9 @@ def main() -> None:
 
     if args.save:
         with open(args.save, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+            json.dump(
+                _result_envelope(results, use_judge=args.judge), f, ensure_ascii=False, indent=2
+            )
         print(f"\n已存基线 → {args.save}")
 
     # CI 硬闸:阈值/回归不达标 → 非零退出(让 pipeline 红)。

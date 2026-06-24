@@ -5,7 +5,7 @@
 
 import pytest
 
-from ops_agent.sql_templates import SQL_TEMPLATES
+from ops_agent.sql_templates import SQL_TEMPLATE_METADATA, SQL_TEMPLATES
 from ops_agent.tools import _validate_select_sql
 
 
@@ -14,3 +14,12 @@ def test_template_passes_readonly_validator(name, sql):
     validated, error = _validate_select_sql(sql)
     assert error is None, f"模板 {name} 未通过只读校验:{error}"
     assert validated is not None
+
+
+def test_template_manifest_matches_template_files():
+    assert SQL_TEMPLATES
+    assert set(SQL_TEMPLATE_METADATA) == set(SQL_TEMPLATES)
+    for name, metadata in SQL_TEMPLATE_METADATA.items():
+        assert metadata["risk"] == "read-only", name
+        assert metadata["description"], name
+        assert metadata["source"], name

@@ -1,7 +1,10 @@
 """Redaction helpers for persisted artifacts."""
 
+import json
+import os
 import re
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any
 
 _PATTERNS = [
@@ -36,9 +39,44 @@ _PATTERNS = [
 ]
 
 
+def _external_patterns() -> list[tuple[re.Pattern[str], str]]:
+    rules_file = os.environ.get("OPS_REDACTION_RULES_FILE")
+    if not rules_file:
+        return []
+    path = Path(rules_file)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+
+    patterns: list[tuple[re.Pattern[str], str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        pattern = item.get("pattern")
+        replacement = item.get("replacement", "***")
+        if not isinstance(pattern, str) or not isinstance(replacement, str):
+            continue
+        flags = 0
+        for flag in item.get("flags", []):
+            if flag == "ignorecase":
+                flags |= re.IGNORECASE
+            elif flag == "multiline":
+                flags |= re.MULTILINE
+            elif flag == "dotall":
+                flags |= re.DOTALL
+        try:
+            patterns.append((re.compile(pattern, flags), replacement))
+        except re.error:
+            continue
+    return patterns
+
+
 def redact_text(text: str) -> str:
     redacted = text
-    for pattern, replacement in _PATTERNS:
+    for pattern, replacement in [*_PATTERNS, *_external_patterns()]:
         redacted = pattern.sub(replacement, redacted)
     return redacted
 

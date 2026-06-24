@@ -5,6 +5,8 @@
 每条样本断言:① 敏感原值不再出现;② 脱敏标记出现(或值被替换)。
 """
 
+import json
+
 import pytest
 
 from ops_agent.redaction import redact, redact_text
@@ -83,3 +85,33 @@ def test_password_word_without_assignment_not_touched():
     # "password is unknown" 没有 :/= 赋值,不应被改(避免过度脱敏吞正常叙述)
     raw = "the password rotation policy is unclear"
     assert redact_text(raw) == raw
+
+
+def test_external_redaction_rules_file(tmp_path, monkeypatch):
+    rules_file = tmp_path / "redaction-rules.json"
+    rules_file.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "tenant-ticket",
+                    "pattern": "TENANT-[0-9]{6}",
+                    "replacement": "TENANT-***",
+                },
+                {
+                    "name": "case-insensitive-field",
+                    "pattern": "internal-ref:[A-Z0-9]+",
+                    "replacement": "internal-ref:***",
+                    "flags": ["ignorecase"],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPS_REDACTION_RULES_FILE", str(rules_file))
+
+    out = redact_text("tenant TENANT-123456 internal-ref:ABC123")
+
+    assert "TENANT-123456" not in out
+    assert "internal-ref:ABC123" not in out
+    assert "TENANT-***" in out
+    assert "internal-ref:***" in out

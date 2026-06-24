@@ -49,6 +49,19 @@ class AggregateTest(unittest.TestCase):
         agg = run_eval._aggregate({})
         self.assertEqual(agg, {"pass_rate": 0.0, "passed": 0, "total": 0, "judge_avg": None})
 
+    def test_aggregate_accepts_saved_envelope(self):
+        payload = {
+            "metadata": {"prompt_version": "test"},
+            "results": {
+                "a": {"passed": True, "judge_score": 1.0},
+                "b": {"passed": False, "judge_score": 0.5},
+            },
+        }
+        agg = run_eval._aggregate(payload)
+        self.assertEqual(agg["passed"], 1)
+        self.assertEqual(agg["total"], 2)
+        self.assertAlmostEqual(agg["judge_avg"], 0.75, places=2)
+
 
 class RunTest(unittest.TestCase):
     """run() 编排:对每条 case 调 diagnose_log + 确定性打分,judge 开关控制是否加评委字段。"""
@@ -106,16 +119,21 @@ class MainTest(unittest.TestCase):
         },
     }
 
+    @patch("evals.run_eval._git_sha")
     @patch("evals.run_eval.run")
-    def test_main_save_writes_baseline_json(self, mock_run):
+    def test_main_save_writes_baseline_json(self, mock_run, mock_git_sha):
         mock_run.return_value = dict(self._STUB_RESULTS)
+        mock_git_sha.return_value = "abc1234"
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "base.json"
             argv = ["run_eval", "--save", str(out)]
             with patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
                 run_eval.main()
             saved = json.loads(out.read_text(encoding="utf-8"))
-        self.assertEqual(saved, self._STUB_RESULTS)
+        self.assertEqual(saved["results"], self._STUB_RESULTS)
+        self.assertEqual(saved["metadata"]["git_sha"], "abc1234")
+        self.assertEqual(saved["metadata"]["case_count"], 2)
+        self.assertFalse(saved["metadata"]["judge_enabled"])
         mock_run.assert_called_once_with(False)  # 未传 --judge → run(False)
 
     @patch("evals.run_eval.run")
@@ -134,6 +152,21 @@ class MainTest(unittest.TestCase):
                 run_eval.main()
             output = buf.getvalue()
         self.assertIn("a", output)
+        self.assertIn("PASS→FAIL", output)
+
+    @patch("evals.run_eval.run")
+    def test_main_baseline_accepts_saved_envelope(self, mock_run):
+        baseline = {"metadata": {"prompt_version": "x"}, "results": {"a": {"passed": True}}}
+        regressed = {"a": {**self._STUB_RESULTS["a"], "passed": False}}
+        mock_run.return_value = regressed
+        with tempfile.TemporaryDirectory() as tmp:
+            base_file = Path(tmp) / "base.json"
+            base_file.write_text(json.dumps(baseline), encoding="utf-8")
+            argv = ["run_eval", "--baseline", str(base_file)]
+            buf = io.StringIO()
+            with patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+                run_eval.main()
+            output = buf.getvalue()
         self.assertIn("PASS→FAIL", output)
 
 

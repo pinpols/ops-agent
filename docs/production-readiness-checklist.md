@@ -31,6 +31,7 @@
 - ✅ prompt 注入纵深:工具输出包进 `<<<UNTRUSTED…>>>` 围栏 + 系统 prompt 明令"围栏内是数据非指令"
 - ✅ 结构性只读:触发层注入"全拒"审批闸,模型即便想 restart 也被拒
 - ✅ eval CI 硬闸:`ops-agent eval --fail-under 0.6`(改 prompt/换模型回归即红)
+- ✅ eval 基线带 metadata envelope(时间、git sha、prompt version、model、judge 开关),旧裸 results 基线兼容
 - ✅ prompt 版本化 `PROMPT_VERSION`,随 run 落 trace
 - ◑ golden 集 12 条(种子);需随判错案例持续扩(回归基线在长大)
 - ◑ 置信度校准 / "查不出"路径:schema 已含 confidence,校准是持续工程
@@ -42,8 +43,8 @@
 - ◑ trace/审计保留:审计按大小滚动;集中/不可篡改存储待接(T2)
 
 ## 7. 安全合规
-- ✅ 出网内容统一脱敏(token/DSN/JWT/邮箱/手机号)(既有)
-- ✅ 审计留存滚动(`OPS_AUDIT_MAX_BYTES`)
+- ✅ 出网内容统一脱敏(token/DSN/JWT/邮箱/手机号) + `OPS_REDACTION_RULES_FILE` 外部规则扩展
+- ✅ 审计留存滚动(`OPS_AUDIT_MAX_BYTES`) + 本地 hash chain(`prev_hash/hash`)防静默篡改
 - ✅ webhook body 上限 + 非法 JSON/超大 payload 拒绝
 - ☐ 出网 egress allowlist、PII 超脱敏正则的合规处理(T2/合规要求驱动)
 
@@ -66,9 +67,10 @@
 ## 上线前置(部署 checklist)
 1. `OPS_PROFILE=prod`,`ops-agent doctor` 全绿(只读 DB 用户、日志只读挂载、exec 关)
 2. 配 `OPS_WEBHOOK_TOKEN`(或 `_FILE`),确认 `/diagnose` 无 token 返 401
-3. 配 `targets.toml`(只读 pg_dsn + metrics_url),`OPS_METRICS_FILE` 指向可写卷
-4. 镜像跑起后 `/healthz` 200、`/metrics` 有计数
-5. CI 绿(lint/format/mypy/测试 70% 闸/eval `--fail-under`)
+3. 配 `OPS_REDACTION_RULES_FILE` 覆盖业务自定义敏感字段(工单号、租户号、内部员工号等)
+4. 配 `targets.toml`(只读 pg_dsn + metrics_url),`OPS_METRICS_FILE` 指向可写卷
+5. 镜像跑起后 `/healthz` 200、`/metrics` 有计数
+6. CI 绿(lint/format/mypy/测试 70% 闸/eval `--fail-under`)
 
 ## 何时升 T2 / 何时**别**升 T3
 - **T2(多团队自服务)**:有多团队需求再做 —— SSO、审批人身份、集中审计、失败告警、更多数据源。

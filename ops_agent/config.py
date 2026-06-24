@@ -68,6 +68,7 @@ class Settings:
     ops_exec_allowlist: tuple[str, ...]
     ops_approval_log: Path
     ops_redact_artifacts: bool
+    ops_redaction_rules_file: Path | None
     langfuse_public_key: str | None
     langfuse_secret_key: str | None
     # T1 生产化:webhook 触发鉴权 + run 预算闸 + 自身指标 textfile
@@ -130,6 +131,11 @@ class Settings:
                 os.environ.get("OPS_APPROVAL_LOG", DEFAULT_APPROVAL_LOG)
             ).resolve(),
             ops_redact_artifacts=_env_bool("OPS_REDACT_ARTIFACTS", default=True),
+            ops_redaction_rules_file=(
+                Path(os.environ["OPS_REDACTION_RULES_FILE"]).resolve()
+                if os.environ.get("OPS_REDACTION_RULES_FILE")
+                else None
+            ),
             langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
             langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
             ops_webhook_token=_env_or_file("OPS_WEBHOOK_TOKEN"),

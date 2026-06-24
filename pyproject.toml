@@ -39,6 +39,9 @@ ops-agent = "ops_agent.cli:main"
 [tool.setuptools.packages.find]
 include = ["ops_agent*", "evals*"]
 
+[tool.setuptools.package-data]
+ops_agent = ["sql_templates/*.sql", "sql_templates/manifest.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

@@ -83,11 +83,13 @@ export OPS_PROFILE=prod
 export OPS_SQL_ALLOW_FREE=false
 export OPS_REDACT_ARTIFACTS=true
 export OPS_APPROVAL_LOG=.ops-agent/approvals.jsonl
+export OPS_REDACTION_RULES_FILE=/etc/ops-agent/redaction-rules.json
 ```
 
 生产 profile 下,`query_pg` 自由 SQL 默认禁用,agent 应使用 `query_pg_template`。
 内置模板包括 `pg_lock_waits`、`active_queries`、`job_status_counts`、
-`recent_failed_jobs`。如果需要新增查询,把 SQL 加到 `ops_agent/sql_templates.py`,
+`recent_failed_jobs`。如果需要新增查询,把 SQL 加到 `ops_agent/sql_templates/*.sql`
+并同步 `manifest.json`,
 不要让模型直接拼自由 SQL。
 
 危险执行工具必须同时满足:
@@ -150,9 +152,10 @@ ops_agent/
   system_tools.py  # list_services / tail_recent_errors / inspect_compose / read_app_config
   metrics_tools.py # query_metrics(只读 Prometheus instant 查询)
   exec_tools.py    # 阶段 5:restart_service(危险写操作,白名单 + 审批闸 + dry-run)
-  sql_templates.py # prod 下允许的只读 SQL 模板
-  redaction.py     # 脱敏(token/DSN 口令/AWS key/JWT/邮箱/手机号)
-  audit.py         # 审批 / 执行审计记录(JSONL,按大小滚动留存)
+  sql_templates.py # prod 下允许的只读 SQL 模板加载器
+  sql_templates/   # 文件化只读 SQL 模板 + manifest
+  redaction.py     # 脱敏(token/DSN 口令/AWS key/JWT/邮箱/手机号)+可配置规则
+  audit.py         # 审批 / 执行审计记录(JSONL,按大小滚动留存 + hash chain)
   trace_io.py      # agent trace 落盘(JSONL,含 prompt_version)
   bundle.py        # 诊断包(diagnosis.json + trace.jsonl + evidence.log + summary.md)
   obs.py           # 可选 Langfuse 接线(未配则 no-op)

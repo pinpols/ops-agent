@@ -213,6 +213,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         "OPS_EXEC_ALLOWLIST": settings.ops_exec_allowlist,
         "OPS_APPROVAL_LOG": settings.ops_approval_log,
         "OPS_REDACT_ARTIFACTS": settings.ops_redact_artifacts,
+        "OPS_REDACTION_RULES_FILE": settings.ops_redaction_rules_file,
         "OPS_TRACE_DIR": settings.ops_trace_dir,
         "OPS_BUNDLE_DIR": settings.ops_bundle_dir,
         "LANGFUSE_ENABLED": settings.langfuse_enabled,
