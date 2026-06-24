@@ -10,3 +10,14 @@ __pycache__/
 # coverage artifacts
 .coverage
 htmlcov/
+
+# tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# langgraph checkpointer sqlite + 其它运行期 db 产物
+*.db
+
+# macOS
+.DS_Store
