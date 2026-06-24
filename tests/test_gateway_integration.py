@@ -90,7 +90,7 @@ def test_shim_create_forwards_system_tool_choice_and_ignores_native_extras():
 
 
 def test_shim_routes_by_logical_name_not_concrete_model():
-    """回归:gateway 按 routes 键(逻辑名)解析,shim 必须发路由名而非 claude-sonnet-4-6,否则 KeyError。"""
+    """回归:gateway 按 routes 键解析,shim 必须发路由名而非具体模型名。"""
     seen = {}
 
     class FakeGateway:
