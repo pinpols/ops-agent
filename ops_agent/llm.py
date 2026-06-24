@@ -56,7 +56,7 @@ def build_gateway_client() -> Any:
         from agentctl.config import load_config
         from agentctl.providers.anthropic_provider import AnthropicProvider
 
-    cfg = load_config(os.getenv("AGENTCTL_CONFIG"))
+    cfg = load_config(os.getenv("AGENT_CTL_CONFIG"))
     native = anthropic.Anthropic(max_retries=get_settings().anthropic_max_retries)
     providers = {"anthropic": AnthropicProvider(native)}
     return GatewayClient.from_config(cfg, providers)
