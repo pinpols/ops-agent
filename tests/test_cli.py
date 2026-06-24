@@ -32,6 +32,29 @@ class DoctorExitCodeTest(unittest.TestCase):
         ):
             main(["doctor"])
 
+    def test_prod_invalid_redaction_rules_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "logs"
+            log_dir.mkdir()
+            rules_file = Path(tmp) / "bad-rules.json"
+            rules_file.write_text("{not-json", encoding="utf-8")
+            log_dir.chmod(0o555)
+            env = {
+                "OPS_PROFILE": "prod",
+                "OPS_LOG_DIR": str(log_dir),
+                "OPS_PG_DSN": "postgresql://app_user@localhost/app",
+                "OPS_REDACTION_RULES_FILE": str(rules_file),
+            }
+            try:
+                with (
+                    patch.dict(os.environ, env, clear=True),
+                    self.assertRaises(SystemExit) as ctx,
+                ):
+                    main(["doctor"])
+            finally:
+                log_dir.chmod(0o755)
+        self.assertNotEqual(ctx.exception.code, 0)
+
 
 class MainErrorTaxonomyTest(unittest.TestCase):
     def test_missing_log_file_exits_code_3(self):

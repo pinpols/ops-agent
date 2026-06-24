@@ -160,6 +160,8 @@ def _cmd_serve(args: argparse.Namespace) -> None:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> None:
+    from ops_agent.redaction import RedactionRulesError, validate_redaction_rules
+
     _apply_target_arg(args)
     settings = get_settings()
     compose_count = (
@@ -182,12 +184,20 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     exec_safe = (not settings.ops_allow_exec) or (
         settings.ops_prod_allow_exec and bool(settings.ops_exec_allowlist)
     )
+    redaction_rules_ok = True
+    redaction_rules_error = None
+    try:
+        validate_redaction_rules(settings.ops_redaction_rules_file)
+    except RedactionRulesError as exc:
+        redaction_rules_ok = False
+        redaction_rules_error = str(exc)
     prod_ready = not settings.production or (
         not settings.ops_sql_allow_free
         and exec_safe
         and db_user_minimal
         and settings.ops_log_dir.exists()
         and not log_dir_writable
+        and redaction_rules_ok
     )
     checks = {
         "OPS_PROFILE": settings.ops_profile,
@@ -214,6 +224,8 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         "OPS_APPROVAL_LOG": settings.ops_approval_log,
         "OPS_REDACT_ARTIFACTS": settings.ops_redact_artifacts,
         "OPS_REDACTION_RULES_FILE": settings.ops_redaction_rules_file,
+        "OPS_REDACTION_RULES_OK": redaction_rules_ok,
+        "OPS_REDACTION_RULES_ERROR": redaction_rules_error,
         "OPS_TRACE_DIR": settings.ops_trace_dir,
         "OPS_BUNDLE_DIR": settings.ops_bundle_dir,
         "LANGFUSE_ENABLED": settings.langfuse_enabled,

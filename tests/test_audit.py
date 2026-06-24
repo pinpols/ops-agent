@@ -65,6 +65,23 @@ class AuditTest(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertIsNone(records[0]["prev_hash"])
 
+    def test_rotation_preserves_hash_chain_from_rotated_file(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "audit.jsonl"
+            append_approval_record(path, tool_name="t1", tool_input={}, approved=True)
+            first = json.loads(path.read_text(encoding="utf-8").strip())
+
+            with patch.dict("os.environ", {"OPS_AUDIT_MAX_BYTES": "1"}, clear=False):
+                append_execution_record(path, tool_name="t2", ok=True, dry_run=True)
+
+            current = json.loads(path.read_text(encoding="utf-8").strip())
+            rotated = json.loads(
+                path.with_name("audit.jsonl.1").read_text(encoding="utf-8").strip()
+            )
+
+        self.assertEqual(rotated["hash"], first["hash"])
+        self.assertEqual(current["prev_hash"], first["hash"])
+
 
 if __name__ == "__main__":
     unittest.main()

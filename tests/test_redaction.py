@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from ops_agent import redaction
 from ops_agent.redaction import redact, redact_text
 
 # (说明, 原文, 不应再出现的敏感子串)
@@ -115,3 +116,36 @@ def test_external_redaction_rules_file(tmp_path, monkeypatch):
     assert "internal-ref:ABC123" not in out
     assert "TENANT-***" in out
     assert "internal-ref:***" in out
+
+
+def test_external_redaction_rules_file_errors_are_not_silent(tmp_path, monkeypatch):
+    rules_file = tmp_path / "bad-rules.json"
+    rules_file.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setenv("OPS_REDACTION_RULES_FILE", str(rules_file))
+    monkeypatch.setattr(redaction, "_EXTERNAL_CACHE", None)
+
+    with pytest.raises(redaction.RedactionRulesError):
+        redact_text("TENANT-123456")
+
+
+def test_external_redaction_rules_are_cached(tmp_path, monkeypatch):
+    rules_file = tmp_path / "redaction-rules.json"
+    rules_file.write_text(
+        json.dumps([{"pattern": "TENANT-[0-9]{6}", "replacement": "TENANT-***"}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPS_REDACTION_RULES_FILE", str(rules_file))
+    monkeypatch.setattr(redaction, "_EXTERNAL_CACHE", None)
+    real_loads = redaction.json.loads
+    calls = 0
+
+    def counted_loads(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(redaction.json, "loads", counted_loads)
+
+    assert redact_text("TENANT-123456") == "TENANT-***"
+    assert redact_text("TENANT-654321") == "TENANT-***"
+    assert calls == 1

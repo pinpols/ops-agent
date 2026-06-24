@@ -60,9 +60,10 @@ def _write_record(path: Path, record: dict[str, Any]) -> None:
     """滚动 + 追加一条记录,全程持锁(防并发竞态丢审计),并写入 hash chain。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     with _AUDIT_LOCK:
+        prev_hash = _last_hash(path)
         _rotate_if_large(path)
         chained = redact(record)
-        chained["prev_hash"] = _last_hash(path)
+        chained["prev_hash"] = prev_hash
         chained["hash"] = _record_hash(chained)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(chained, ensure_ascii=False) + "\n")

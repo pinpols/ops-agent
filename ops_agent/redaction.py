@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import threading
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -38,40 +39,87 @@ _PATTERNS = [
     (re.compile(r"\b1[3-9]\d{9}\b"), "1**********"),
 ]
 
+_FLAG_MAP = {
+    "ignorecase": re.IGNORECASE,
+    "multiline": re.MULTILINE,
+    "dotall": re.DOTALL,
+}
+_EXTERNAL_CACHE_LOCK = threading.Lock()
+_EXTERNAL_CACHE: tuple[str, int, int, list[tuple[re.Pattern[str], str]]] | None = None
 
-def _external_patterns() -> list[tuple[re.Pattern[str], str]]:
+
+class RedactionRulesError(ValueError):
+    """External redaction rules are configured but cannot be loaded safely."""
+
+
+def _rules_path_from_env() -> Path | None:
     rules_file = os.environ.get("OPS_REDACTION_RULES_FILE")
-    if not rules_file:
-        return []
-    path = Path(rules_file)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    return Path(rules_file).expanduser() if rules_file else None
+
+
+def _compile_external_rules(raw: Any) -> list[tuple[re.Pattern[str], str]]:
     if not isinstance(raw, list):
-        return []
+        raise RedactionRulesError("redaction rules file must contain a JSON list")
 
     patterns: list[tuple[re.Pattern[str], str]] = []
-    for item in raw:
+    for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            continue
+            raise RedactionRulesError(f"redaction rule #{index} must be an object")
         pattern = item.get("pattern")
         replacement = item.get("replacement", "***")
-        if not isinstance(pattern, str) or not isinstance(replacement, str):
-            continue
+        if not isinstance(pattern, str) or not pattern:
+            raise RedactionRulesError(f"redaction rule #{index} requires a non-empty pattern")
+        if not isinstance(replacement, str):
+            raise RedactionRulesError(f"redaction rule #{index} replacement must be a string")
+
+        raw_flags = item.get("flags", [])
+        if not isinstance(raw_flags, list) or not all(isinstance(flag, str) for flag in raw_flags):
+            raise RedactionRulesError(f"redaction rule #{index} flags must be a list of strings")
         flags = 0
-        for flag in item.get("flags", []):
-            if flag == "ignorecase":
-                flags |= re.IGNORECASE
-            elif flag == "multiline":
-                flags |= re.MULTILINE
-            elif flag == "dotall":
-                flags |= re.DOTALL
+        for flag in raw_flags:
+            if flag not in _FLAG_MAP:
+                raise RedactionRulesError(f"redaction rule #{index} has unknown flag {flag!r}")
+            flags |= _FLAG_MAP[flag]
+
         try:
             patterns.append((re.compile(pattern, flags), replacement))
-        except re.error:
-            continue
+        except re.error as exc:
+            raise RedactionRulesError(f"redaction rule #{index} has invalid regex: {exc}") from exc
     return patterns
+
+
+def _load_external_patterns(path: Path) -> list[tuple[re.Pattern[str], str]]:
+    global _EXTERNAL_CACHE
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise RedactionRulesError(f"cannot read redaction rules file {path}: {exc}") from exc
+
+    cache_key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+    with _EXTERNAL_CACHE_LOCK:
+        if _EXTERNAL_CACHE and _EXTERNAL_CACHE[:3] == cache_key:
+            return _EXTERNAL_CACHE[3]
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RedactionRulesError(f"invalid redaction rules JSON in {path}: {exc}") from exc
+
+    patterns = _compile_external_rules(raw)
+    with _EXTERNAL_CACHE_LOCK:
+        _EXTERNAL_CACHE = (*cache_key, patterns)
+    return patterns
+
+
+def _external_patterns() -> list[tuple[re.Pattern[str], str]]:
+    path = _rules_path_from_env()
+    return _load_external_patterns(path) if path else []
+
+
+def validate_redaction_rules(path: Path | None = None) -> None:
+    target = path or _rules_path_from_env()
+    if target:
+        _load_external_patterns(target)
 
 
 def redact_text(text: str) -> str:
