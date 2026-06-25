@@ -1,10 +1,15 @@
 """System-aware read-only tools for the target batch system."""
 
+import re
 from pathlib import Path
 
 from ops_agent.config import get_settings
 from ops_agent.tool_result import ToolResult
 from ops_agent.tools import _coerce_positive_limit
+
+# 服务名白名单:只允许小写字母/数字/连字符,挡掉路径穿越(.. / / / 空字节)。
+# 否则模型(或被注入的日志/配置内容)可诱导 read_app_config 读 OPS_TARGET_ROOT 外的任意文件。
+_SERVICE_RE = re.compile(r"^[a-z0-9-]+$")
 
 _ERROR_PATTERNS = ("ERROR", "WARN", "Exception", "timeout", "refused", "No space", "Lock")
 _CONFIG_GLOBS = ("application*.yml", "application*.yaml", "application*.properties")
@@ -197,6 +202,11 @@ def read_app_config_result(service: str | None = None, max_chars: int = 6000) ->
     if not root or not root.exists():
         return ToolResult.failure("[read_app_config] 未配置或未找到 OPS_TARGET_ROOT")
 
+    if service is not None and not _SERVICE_RE.match(service):
+        return ToolResult.failure(
+            f"[read_app_config] 非法 service={service!r}(只允许小写字母/数字/连字符)"
+        )
+
     search_roots = [root / _service_to_module(service)] if service else [root]
     files: list[Path] = []
     for base in search_roots:
@@ -204,7 +214,15 @@ def read_app_config_result(service: str | None = None, max_chars: int = 6000) ->
             for glob in _CONFIG_GLOBS:
                 files.extend(base.rglob(glob))
 
-    files = sorted(set(files))
+    # 纵深防御:即便服务名/glob 出岔,命中文件也必须落在 root 内(防 symlink/穿越外泄)。
+    safe_files = []
+    for f in files:
+        try:
+            if f.resolve().is_relative_to(root):
+                safe_files.append(f)
+        except OSError:
+            continue
+    files = sorted(set(safe_files))
     if not files:
         suffix = f" service={service}" if service else ""
         return ToolResult.failure(f"[read_app_config] 未找到 application 配置{suffix}")

@@ -60,6 +60,31 @@ class SystemToolsTest(unittest.TestCase):
         self.assertIn("datasource", result.to_text())
         self.assertEqual(result.metadata["service"], "worker-import")
 
+    def test_read_app_config_rejects_path_traversal_service(self):
+        # service 用户/模型可控:含 .. 或 / 直接拒,挡掉读 root 外任意文件(对抗审查 C2)
+        for bad in ("../../etc", "..", "a/b", "foo bar", ""):
+            result = system_tools.read_app_config_result(bad)
+            self.assertFalse(result.ok, bad)
+            self.assertIn("非法 service", result.to_text(), bad)
+
+    def test_read_app_config_excludes_files_outside_root(self):
+        # 纵深:即便 symlink 把配置指到 root 外,is_relative_to 守门也不收录
+        outside = Path(self.tmp.name).parent / "outside-secret"
+        outside.mkdir(exist_ok=True)
+        try:
+            (outside / "application.yml").write_text("secret: leaked\n", encoding="utf-8")
+            link = self.root / "batch-worker-import" / "evil-link"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlink 不可用")
+            result = system_tools.read_app_config_result("worker-import")
+            self.assertNotIn("leaked", result.to_text())
+        finally:
+            import shutil
+
+            shutil.rmtree(outside, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

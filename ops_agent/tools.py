@@ -175,6 +175,10 @@ def _validate_select_sql(sql: object) -> tuple[str | None, ToolResult | None]:
         return None, ToolResult.failure("[query_pg] 只允许 SELECT / WITH 查询", sql=s)
     if ";" in s:
         return None, ToolResult.failure("[query_pg] 禁止多语句(含 ;)", sql=s)
+    # 注释会被用来绕过关键词黑名单:`pg_/**/read_file` 拆词后正则 \b 不再匹配,
+    # `--` 行注释又能截掉后半句。只读工具无正当理由带注释,一律拒绝(护栏纵深)。
+    if "--" in s or "/*" in s or "*/" in s or "#" in s:
+        return None, ToolResult.failure("[query_pg] 禁止 SQL 注释(--、/* */、#)", sql=s)
     if _SQL_FORBIDDEN.search(s):
         return None, ToolResult.failure("[query_pg] 含被禁关键词(只读工具,不允许写/DDL)", sql=s)
     return s, None

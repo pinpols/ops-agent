@@ -69,6 +69,24 @@ class ProfileValidationTest(unittest.TestCase):
         with patch.dict(os.environ, {"OPS_REDACTION_RULES_FILE": "rules.json"}, clear=True):
             self.assertEqual(Settings.from_env().ops_redaction_rules_file.name, "rules.json")
 
+    def test_prod_forces_redact_even_if_disabled(self):
+        # prod 下显式关脱敏也必须 fail-closed 为 True,防 artifact 明文外泄(对抗审查 M2)
+        with patch.dict(
+            os.environ,
+            {"OPS_PROFILE": "prod", "OPS_REDACT_ARTIFACTS": "false"},
+            clear=True,
+        ):
+            self.assertTrue(Settings.from_env().ops_redact_artifacts)
+
+    def test_dev_respects_redact_disabled(self):
+        # 非 prod 仍尊重显式关闭(只在 prod 强制)
+        with patch.dict(
+            os.environ,
+            {"OPS_PROFILE": "dev", "OPS_REDACT_ARTIFACTS": "false"},
+            clear=True,
+        ):
+            self.assertFalse(Settings.from_env().ops_redact_artifacts)
+
 
 if __name__ == "__main__":
     unittest.main()
