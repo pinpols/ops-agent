@@ -81,6 +81,7 @@ class JobQueue:
         self._queue_depth_alert_threshold = max(0, queue_depth_alert_threshold)
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._timers: dict[threading.Timer, str] = {}  # 挂起的重试 Timer → job_id(停机时取消)
         self._threads: list[threading.Thread] = []
         for i in range(max(1, workers)):
             t = threading.Thread(target=self._worker_loop, name=f"diag-worker-{i}", daemon=True)
@@ -136,9 +137,28 @@ class JobQueue:
         return min(self._retry_max_seconds, self._retry_base_seconds * (2 ** max(0, attempts - 1)))
 
     def _requeue_after_delay(self, job_id: str, delay: float) -> None:
-        timer = threading.Timer(delay, self._requeue, args=(job_id,))
+        def fire() -> None:
+            with self._lock:
+                self._timers.pop(timer, None)
+            self._requeue(job_id)
+
+        timer = threading.Timer(delay, fire)
         timer.daemon = True
+        with self._lock:
+            if self._stop.is_set():
+                # 停机竞态:不再排注定丢失的 Timer,直接标终态,避免任务永久卡 QUEUED
+                self._mark_failed_locked(job_id, "shutdown_retry_cancelled")
+                return
+            self._timers[timer] = job_id
         timer.start()
+
+    def _mark_failed_locked(self, job_id: str, error: str) -> None:
+        """在持锁状态下把非终态任务标记 FAILED(给查询端点一个确定终态)。"""
+        job = self._jobs.get(job_id)
+        if job is not None and job.status not in (SUCCEEDED, FAILED):
+            job.status = FAILED
+            job.error = error
+            METRICS.inc("jobs_failed_total")
 
     def _requeue(self, job_id: str) -> None:
         if self._stop.is_set():
@@ -192,6 +212,7 @@ class JobQueue:
                     METRICS.inc("jobs_succeeded_total")
                 except Exception as exc:  # noqa: BLE001 - worker 边界:任务失败不拖垮 worker
                     logger.exception("诊断任务失败 job_id=%s trace_id=%s", job_id, job.trace_id)
+                    retry_delay: float | None = None
                     with self._lock:
                         if job_id in self._jobs:
                             stored = self._jobs[job_id]
@@ -199,18 +220,29 @@ class JobQueue:
                             stored.error = f"{type(exc).__name__}: {exc}"
                             if stored.attempts <= self._max_retries:
                                 stored.status = QUEUED
-                                delay = self._retry_delay(stored.attempts)
+                                retry_delay = self._retry_delay(stored.attempts)
                                 METRICS.inc("jobs_retried_total")
-                                self._requeue_after_delay(job_id, delay)
                             else:
                                 stored.status = FAILED
                                 METRICS.inc("jobs_failed_total")
+                    # 在锁外排重试 Timer(Lock 不可重入,且 delay=0 时 Timer 会立刻回调取锁)
+                    if retry_delay is not None:
+                        self._requeue_after_delay(job_id, retry_delay)
             finally:
                 self._q.task_done()
                 self.update_queue_metrics()
 
     def shutdown(self, timeout: float = 10.0) -> None:
-        """置停并 join worker(排空在途)。"""
+        """置停并 join worker(排空在途)。挂起的重试 Timer 取消并把对应任务标终态。"""
         self._stop.set()
+        with self._lock:
+            pending = dict(self._timers)
+            self._timers.clear()
+        for timer in pending:
+            timer.cancel()  # 取消还没触发的重试,避免 daemon Timer 静默丢单
+        if pending:
+            with self._lock:
+                for job_id in pending.values():
+                    self._mark_failed_locked(job_id, "shutdown_retry_cancelled")
         for t in self._threads:
             t.join(timeout=timeout)

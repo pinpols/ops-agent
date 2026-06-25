@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 
-from ops_agent.jobqueue import FAILED, SUCCEEDED, JobQueue
+from ops_agent.jobqueue import FAILED, QUEUED, SUCCEEDED, JobQueue
 
 
 def _wait(jq: JobQueue, job_id: str, timeout: float = 3.0):
@@ -105,6 +105,33 @@ class JobQueueTest(unittest.TestCase):
             self.assertEqual(done.trace_id, "trace-retry")
         finally:
             jq.shutdown()
+
+    def test_shutdown_during_retry_delay_marks_failed_not_stuck_queued(self):
+        # 任务失败进入重试延迟(Timer 未触发)时停机:必须取消 Timer 并把任务标终态 FAILED,
+        # 否则任务永久卡在 QUEUED(查询端点看不到终态)且 Timer 作为 daemon 静默丢失。
+        def always_fail(job):
+            raise RuntimeError("boom")
+
+        # retry_base_seconds 很大 → 第一次失败后 Timer 排期但远不触发,停机时它一定还挂着
+        jq = JobQueue(always_fail, workers=1, max_retries=3, retry_base_seconds=30)
+        job = jq.submit("q")
+
+        # 等到 handler 跑过一次、任务落入重试态(QUEUED + attempts≥1 + Timer pending)
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            j = jq.get(job.id)
+            if j is not None and j.attempts >= 1 and j.status == QUEUED:
+                break
+            time.sleep(0.01)
+        self.assertEqual(jq.get(job.id).status, QUEUED)  # 确认处于重试延迟中
+
+        jq.shutdown(timeout=2)
+
+        final = jq.get(job.id)
+        self.assertEqual(final.status, FAILED)  # 不再卡 QUEUED
+        self.assertEqual(final.error, "shutdown_retry_cancelled")
+        # 已取消所有挂起 Timer,无泄漏
+        self.assertEqual(len(jq._timers), 0)
 
 
 if __name__ == "__main__":
