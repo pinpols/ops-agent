@@ -7,6 +7,7 @@
 import logging
 import signal
 import threading
+import time
 from typing import Any
 
 from ops_agent.config import Settings, get_settings
@@ -46,6 +47,10 @@ def process_once(rq: RedisQueue, handler: Any, timeout: int = 1) -> str | None:
         METRICS.inc("jobs_lost_total")
         return None
     rq.mark_running(job_id)
+    from ops_agent.metrics import METRICS
+
+    METRICS.add("workers_busy", 1, backend="redis")  # 在途 worker 数(利用率分子)
+    started = time.monotonic()
     try:
         logger.info("处理 job_id=%s trace_id=%s", job_id, job.trace_id)
         result = handler(job)
@@ -55,6 +60,9 @@ def process_once(rq: RedisQueue, handler: Any, timeout: int = 1) -> str | None:
         outcome = rq.fail_or_retry(job_id, f"{type(exc).__name__}: {exc}")
         logger.warning("job %s trace_id=%s 失败 → %s: %s", job_id, job.trace_id, outcome, exc)
         return outcome
+    finally:
+        METRICS.observe("job_duration_seconds", time.monotonic() - started, backend="redis")
+        METRICS.add("workers_busy", -1, backend="redis")
 
 
 def _worker_loop(rq: RedisQueue, handler: Any, stop: threading.Event) -> None:
@@ -71,8 +79,11 @@ def run(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
     rq = build_redis_queue(settings)
     # 延迟 import:复用 ingress 端的只读诊断 handler(注入全拒审批闸 + 回调)。
+    from ops_agent.metrics import METRICS
     from ops_agent.server import diagnosis_job_handler
 
+    worker_count = max(1, settings.ops_worker_count)
+    METRICS.set("workers_total", worker_count, backend="redis")  # 利用率分母
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -80,7 +91,7 @@ def run(settings: Settings | None = None) -> None:
         threading.Thread(
             target=_worker_loop, args=(rq, diagnosis_job_handler, stop), name=f"worker-{i}"
         )
-        for i in range(max(1, settings.ops_worker_count))
+        for i in range(worker_count)
     ]
     for t in threads:
         t.start()

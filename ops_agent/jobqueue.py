@@ -83,7 +83,9 @@ class JobQueue:
         self._stop = threading.Event()
         self._timers: dict[threading.Timer, str] = {}  # 挂起的重试 Timer → job_id(停机时取消)
         self._threads: list[threading.Thread] = []
-        for i in range(max(1, workers)):
+        worker_n = max(1, workers)
+        METRICS.set("workers_total", worker_n, backend="memory")  # 利用率分母
+        for i in range(worker_n):
             t = threading.Thread(target=self._worker_loop, name=f"diag-worker-{i}", daemon=True)
             t.start()
             self._threads.append(t)
@@ -123,6 +125,9 @@ class JobQueue:
     def update_queue_metrics(self) -> None:
         depth = self.qsize()
         METRICS.set("queue_depth", depth, backend="memory")
+        with self._lock:
+            backlog = len(self._timers)  # 挂起的重试 Timer = 内存后端的重试积压
+        METRICS.set("retry_backlog", backlog, backend="memory")
         if self._queue_depth_alert_threshold > 0:
             METRICS.set("queue_depth_alert_threshold", self._queue_depth_alert_threshold)
             METRICS.set(
@@ -203,6 +208,8 @@ class JobQueue:
                     continue
                 self._set_status(job_id, RUNNING)
                 self.update_queue_metrics()
+                METRICS.add("workers_busy", 1, backend="memory")  # 在途 worker 数(利用率分子)
+                started = time.monotonic()
                 try:
                     result = self._handler(job)
                     with self._lock:
@@ -228,6 +235,10 @@ class JobQueue:
                     # 在锁外排重试 Timer(Lock 不可重入,且 delay=0 时 Timer 会立刻回调取锁)
                     if retry_delay is not None:
                         self._requeue_after_delay(job_id, retry_delay)
+                finally:
+                    elapsed = time.monotonic() - started
+                    METRICS.observe("job_duration_seconds", elapsed, backend="memory")
+                    METRICS.add("workers_busy", -1, backend="memory")
             finally:
                 self._q.task_done()
                 self.update_queue_metrics()

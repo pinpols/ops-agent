@@ -144,6 +144,9 @@ class RedisQueue:
     def update_queue_metrics(self) -> None:
         depth = self.qsize()
         METRICS.set("queue_depth", depth, backend="redis")
+        # 重试积压(到期前挂在 delayed zset)+ 死信堆积:都是积压排查的关键水位
+        METRICS.set("retry_backlog", self.retry_size(), backend="redis")
+        METRICS.set("dlq_size", self.dlq_size(), backend="redis")
         if self._queue_depth_alert_threshold > 0:
             METRICS.set("queue_depth_alert_threshold", self._queue_depth_alert_threshold)
             METRICS.set(

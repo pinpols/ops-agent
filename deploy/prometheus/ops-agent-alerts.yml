@@ -1,0 +1,116 @@
+# Prometheus 告警规则示例 —— ops-agent 异步队列 / worker 健康。
+#
+# 前提:ops-agent 的指标已被抓取(两条路径任选)：
+#   1) 直接抓 `serve` 的 /metrics 端点(ingress 进程指标:webhook/queue_depth);
+#   2) worker 进程把 METRICS.write_textfile 落到 node_exporter 的 textfile collector 目录
+#      (worker 侧指标:job_duration_seconds / workers_busy / workers_total / dlq_size)。
+# 指标前缀统一 `ops_agent_`。把本文件挂到 Prometheus 的 rule_files 即可。
+#
+# 阈值是保守起点,按你的流量/SLO 调整(见 docs/runbook/queue-operations.md)。
+
+groups:
+  - name: ops-agent-queue
+    rules:
+      # ── 积压 ───────────────────────────────────────────────
+      - alert: OpsAgentQueueBacklogHigh
+        expr: max(ops_agent_queue_depth) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ops-agent 主队列积压偏高(>50 持续 5m)"
+          description: "queue_depth={{ $value }}。worker 消费跟不上入队。排查见 runbook §积压。"
+
+      - alert: OpsAgentQueueBacklogCritical
+        expr: max(ops_agent_queue_depth) > 200
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ops-agent 主队列严重积压(>200 持续 5m)"
+          description: "queue_depth={{ $value }}。接近背压上限会开始丢单(jobs_rejected_total)。立即扩 worker 或限流上游。"
+
+      - alert: OpsAgentBackpressureDropping
+        expr: rate(ops_agent_jobs_rejected_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ops-agent 正在背压丢单"
+          description: "队列满,新任务被拒(429)。速率={{ $value }}/s。扩 worker / 提高 OPS_QUEUE_MAX / 限流上游。"
+
+      # ── 死信 / 重试 ─────────────────────────────────────────
+      - alert: OpsAgentDlqGrowing
+        expr: max(ops_agent_dlq_size) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ops-agent 死信队列非空(>10m)"
+          description: "dlq_size={{ $value }}。有任务超重试上限。排查根因后用 `ops-agent dlq --requeue <id>` 重入。见 runbook §死信。"
+
+      - alert: OpsAgentRetryBacklogHigh
+        expr: max(ops_agent_retry_backlog) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ops-agent 重试积压偏高"
+          description: "retry_backlog={{ $value }}。大量任务在退避重试中,通常意味下游(LLM/PG)持续不稳。看 jobs_failed_total 根因。"
+
+      # ── 失败率 ─────────────────────────────────────────────
+      - alert: OpsAgentHighFailureRate
+        expr: |
+          rate(ops_agent_jobs_failed_total[10m])
+            / clamp_min(rate(ops_agent_jobs_succeeded_total[10m])
+                        + rate(ops_agent_jobs_failed_total[10m]), 1) > 0.2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ops-agent 任务失败率 >20%(10m)"
+          description: "失败占比={{ $value | humanizePercentage }}。下游故障或诊断逻辑回归。"
+
+      - alert: OpsAgentJobsLost
+        expr: increase(ops_agent_jobs_lost_total[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "ops-agent 出现丢单(出队但状态缺失)"
+          description: "jobs_lost_total 增长 {{ $value }}。多为 job TTL 过期/被驱逐或 max_results<max_queue 误配。"
+
+      # ── worker 饱和 / 停摆 ──────────────────────────────────
+      - alert: OpsAgentWorkersSaturated
+        expr: |
+          max(ops_agent_workers_busy{backend="redis"})
+            / clamp_min(max(ops_agent_workers_total{backend="redis"}), 1) >= 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ops-agent worker 持续满载(利用率≈100%,10m)"
+          description: "所有 worker 长期占满,无空闲消费能力。配合 queue_depth 上升即应扩容。"
+
+      - alert: OpsAgentDiagnoseStalled
+        expr: |
+          max(ops_agent_queue_depth) > 0
+            and rate(ops_agent_jobs_succeeded_total[10m]) == 0
+            and rate(ops_agent_jobs_failed_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ops-agent 队列有积压但 10m 零产出(疑似 worker 停摆)"
+          description: "queue_depth>0 却既无成功也无失败。检查 serve-worker 进程是否存活 / Redis 连接 / BRPOP 阻塞。"
+
+      # ── 处理耗时(histogram)─────────────────────────────────
+      - alert: OpsAgentJobP95Slow
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(ops_agent_job_duration_seconds_bucket[10m])) by (le)) > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ops-agent 诊断 P95 耗时 >60s(10m)"
+          description: "P95={{ $value }}s。多步 LLM 变慢或工具取证变慢,逼近 OPS_MAX_RUN_SECONDS 会触发预算截断。"
