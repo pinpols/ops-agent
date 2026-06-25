@@ -250,6 +250,7 @@ def _cmd_dlq(args: argparse.Namespace) -> None:
 
 def _cmd_doctor(args: argparse.Namespace) -> None:
     from ops_agent.redaction import RedactionRulesError, validate_redaction_rules
+    from ops_agent.server import _callback_url_allowed
 
     _apply_target_arg(args)
     settings = get_settings()
@@ -280,6 +281,8 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     except RedactionRulesError as exc:
         redaction_rules_ok = False
         redaction_rules_error = str(exc)
+    callback_allowed, callback_reason = _callback_url_allowed(settings.ops_callback_url, settings)
+    callback_safe = not settings.ops_callback_url or callback_allowed
     prod_ready = not settings.production or (
         not settings.ops_sql_allow_free
         and exec_safe
@@ -287,6 +290,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         and settings.ops_log_dir.exists()
         and not log_dir_writable
         and redaction_rules_ok
+        and callback_safe
     )
     checks = {
         "OPS_PROFILE": settings.ops_profile,
@@ -315,6 +319,10 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         "OPS_REDACTION_RULES_FILE": settings.ops_redaction_rules_file,
         "OPS_REDACTION_RULES_OK": redaction_rules_ok,
         "OPS_REDACTION_RULES_ERROR": redaction_rules_error,
+        "OPS_CALLBACK_URL": bool(settings.ops_callback_url),
+        "OPS_CALLBACK_ALLOW_HOSTS": settings.ops_callback_allow_hosts,
+        "OPS_CALLBACK_SAFE": callback_safe,
+        "OPS_CALLBACK_POLICY_REASON": callback_reason if settings.ops_callback_url else None,
         "OPS_TRACE_DIR": settings.ops_trace_dir,
         "OPS_BUNDLE_DIR": settings.ops_bundle_dir,
         "LANGFUSE_ENABLED": settings.langfuse_enabled,

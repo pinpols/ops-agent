@@ -65,6 +65,16 @@ class HandleDiagnoseTest(unittest.TestCase):
         self.assertIs(captured["approver"], server._deny_all_approver)
         self.assertFalse(server._deny_all_approver("restart_service", {}))
 
+    def test_rejects_invalid_target(self):
+        status, body = server.handle_diagnose({"question": "x", "target": "../prod"})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "invalid_target")
+
+    def test_rejects_too_long_question(self):
+        status, body = server.handle_diagnose({"question": "x" * (server._MAX_QUESTION_CHARS + 1)})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "question_too_long")
+
     def test_budget_exceeded_returns_503(self):
         with patch("ops_agent.agent.run_agent", side_effect=BudgetExceeded("token 预算耗尽")):
             status, body = server.handle_diagnose({"question": "x"})
@@ -251,6 +261,40 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
         self.assertEqual(received[0]["result"]["trace_id"], "trace-callback")
         self.assertEqual(received[1]["status"], "failed")
         self.assertEqual(received[1]["error"], "RuntimeError: boom")
+
+
+class CallbackPolicyTest(unittest.TestCase):
+    def test_dev_allows_loopback_http_for_local_tests(self):
+        with patch.dict("os.environ", {"OPS_PROFILE": "dev"}, clear=True):
+            settings = server.get_settings()
+        ok, reason = server._callback_url_allowed("http://127.0.0.1:8080/cb", settings)
+        self.assertTrue(ok, reason)
+
+    def test_prod_requires_https_and_allowlist(self):
+        with patch.dict(
+            "os.environ",
+            {"OPS_PROFILE": "prod", "OPS_CALLBACK_ALLOW_HOSTS": "8.8.8.8"},
+            clear=True,
+        ):
+            settings = server.get_settings()
+        ok, reason = server._callback_url_allowed("http://8.8.8.8/cb", settings)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "prod_callback_requires_https")
+
+        ok, reason = server._callback_url_allowed("https://1.1.1.1/cb", settings)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "callback_host_not_in_allowlist")
+
+    def test_prod_rejects_non_public_callback_ip(self):
+        with patch.dict(
+            "os.environ",
+            {"OPS_PROFILE": "prod", "OPS_CALLBACK_ALLOW_HOSTS": "127.0.0.1"},
+            clear=True,
+        ):
+            settings = server.get_settings()
+        ok, reason = server._callback_url_allowed("https://127.0.0.1/cb", settings)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "callback_host_resolves_to_non_public_ip")
 
 
 if __name__ == "__main__":

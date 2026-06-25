@@ -35,6 +35,13 @@ spec:
                 name: ops-agent-config
             - secretRef:
                 name: ops-agent-secrets
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPS_APPROVAL_LOG
+              value: "/var/lib/ops-agent/audit/$(POD_NAME)-approvals.jsonl"
           # liveness:心跳文件 mtime 新鲜度。主循环每秒 touch;>30s 未更新视为僵死 → 重启。
           # 比"进程在不在"更强:能检出主循环卡死/死锁(容器仍 Running 但不工作)。
           livenessProbe:
@@ -68,11 +75,16 @@ spec:
               mountPath: /var/run/ops-agent
             - name: state
               mountPath: /app/.ops-agent
+            - name: audit
+              mountPath: /var/lib/ops-agent/audit
       volumes:
         - name: runtime
           emptyDir: {}
         - name: state
           emptyDir: {}
+        - name: audit
+          persistentVolumeClaim:
+            claimName: ops-agent-audit
 ---
 # worker 扩容:CPU 是可移植的起步指标。
 # 更贴切的是按 queue_depth 扩(需 prometheus-adapter 把 ops_agent_queue_depth 暴露成

@@ -84,6 +84,8 @@ export OPS_SQL_ALLOW_FREE=false
 export OPS_REDACT_ARTIFACTS=true
 export OPS_APPROVAL_LOG=.ops-agent/approvals.jsonl
 export OPS_REDACTION_RULES_FILE=/etc/ops-agent/redaction-rules.json
+# 如启用异步回调,prod 下必须 HTTPS + 主机 allowlist
+export OPS_CALLBACK_ALLOW_HOSTS=ops-callback.example.com
 ```
 
 生产 profile 下,`query_pg` 自由 SQL 默认禁用,agent 应使用 `query_pg_template`。
@@ -101,8 +103,8 @@ export OPS_REDACTION_RULES_FILE=/etc/ops-agent/redaction-rules.json
 
 审批结果会写入 `OPS_APPROVAL_LOG`。trace 和 bundle 默认脱敏,会遮蔽常见 token、
 DSN 密码、邮箱和手机号。`ops-agent doctor` 会检查生产 profile 下的自由 SQL、
-执行 allowlist、PG 用户名和日志目录是否可写;生产环境应使用最小权限只读 DB 用户,
-并把日志目录以只读方式挂载。
+执行 allowlist、PG 用户名、callback 出站策略和日志目录是否可写;生产环境应使用
+最小权限只读 DB 用户,并把日志目录以只读方式挂载。
 
 `diagnose.py` 已实现:读日志 → 用 Anthropic function calling 逼模型按 `models.Diagnosis`
 schema 返回 → Pydantic 校验成对象。**概念详解见 [`docs/phase1-concepts.md`](docs/phase1-concepts.md)**

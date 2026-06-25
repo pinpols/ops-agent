@@ -5,6 +5,7 @@
 
 import os
 import re
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -17,6 +18,14 @@ from ops_agent.tool_result import ToolResult
 _SERVICE_RE = re.compile(r"^[a-z0-9-]+$")
 _LOG_LINE_CAP = 1000
 _QUERY_ROW_CAP = 200
+_LOG_FILE_CAP = 20
+_LOG_SCAN_BYTES = 2 * 1024 * 1024
+_MAX_PATTERN_CHARS = 128
+_UNSAFE_REGEX_PATTERNS = (
+    re.compile(r"\([^)]*[+*{][^)]*\)[+*?{]"),
+    re.compile(r"\\[1-9]"),
+    re.compile(r"\(\?([=!<]|P=)"),
+)
 
 
 def _coerce_positive_limit(
@@ -39,6 +48,32 @@ def _coerce_positive_limit(
 def _log_dir() -> Path:
     # 默认指向项目 data/(样本日志在此);真用时设 OPS_LOG_DIR=../file-batch-system/logs/app
     return get_settings().ops_log_dir
+
+
+def _compile_safe_log_pattern(pattern: str | None) -> tuple[re.Pattern[str] | None, str | None]:
+    if pattern is None:
+        return None, None
+    if len(pattern) > _MAX_PATTERN_CHARS:
+        return None, f"pattern 过长(最多 {_MAX_PATTERN_CHARS} 字符)"
+    for unsafe in _UNSAFE_REGEX_PATTERNS:
+        if unsafe.search(pattern):
+            return None, "pattern 正则过于复杂,疑似可导致 ReDoS"
+    try:
+        return re.compile(pattern), None
+    except re.error as e:
+        return None, f"pattern 正则非法:{e}"
+
+
+def _iter_tail_lines(path: Path, *, max_bytes: int = _LOG_SCAN_BYTES):
+    """Yield decoded lines from the bounded tail window of a log file."""
+    size = path.stat().st_size
+    start = max(0, size - max_bytes)
+    with path.open("rb") as f:
+        if start:
+            f.seek(start)
+            f.readline()  # drop partial first line
+        for raw in f:
+            yield raw.decode("utf-8", errors="replace").rstrip("\n")
 
 
 def read_logs_result(service: str, pattern: str | None = None, max_lines: int = 200) -> ToolResult:
@@ -66,6 +101,10 @@ def read_logs_result(service: str, pattern: str | None = None, max_lines: int = 
             "[read_logs] 生产 profile 要求日志目录只读挂载,当前目录可写,拒绝读取",
             log_dir=str(base),
         )
+    rx, pattern_error = _compile_safe_log_pattern(pattern)
+    if pattern_error:
+        return ToolResult.failure(f"[read_logs] {pattern_error}", service=service)
+
     # 只在日志目录内 glob *<service>*.log;resolve 后再确认仍在 base 下(双保险防穿越)
     matches = sorted(p for p in base.glob(f"*{service}*.log") if p.resolve().is_relative_to(base))
     if not matches:
@@ -75,17 +114,19 @@ def read_logs_result(service: str, pattern: str | None = None, max_lines: int = 
             log_dir=str(base),
         )
 
-    out_lines: list[str] = []
-    try:
-        rx = re.compile(pattern) if pattern else None
-    except re.error as e:
-        return ToolResult.failure(f"[read_logs] pattern 正则非法:{e}", service=service)
-    for path in matches:
+    out_lines: deque[str] = deque(maxlen=limit)
+    matched_lines = 0
+    scanned_files = 0
+    truncated_files = len(matches) > _LOG_FILE_CAP
+    scanned_bytes = 0
+    for path in matches[:_LOG_FILE_CAP]:
+        scanned_files += 1
         try:
-            with path.open(encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if rx is None or rx.search(line):
-                        out_lines.append(line.rstrip("\n"))
+            scanned_bytes += min(path.stat().st_size, _LOG_SCAN_BYTES)
+            for line in _iter_tail_lines(path):
+                if rx is None or rx.search(line):
+                    matched_lines += 1
+                    out_lines.append(line)
         except OSError as e:
             out_lines.append(f"[read_logs] 读取 {path.name} 失败:{e}")
 
@@ -95,21 +136,24 @@ def read_logs_result(service: str, pattern: str | None = None, max_lines: int = 
             service=service,
             pattern=pattern,
             matched_files=len(matches),
+            scanned_files=scanned_files,
         )
 
-    # 尾部 max_lines(最新),并标注截断
-    truncated = len(out_lines) > limit
-    tail = out_lines[-limit:]
+    # 尾部 max_lines(最新),并标注截断。扫描窗口和文件数有硬上限,避免超大日志拖垮 worker。
+    tail = list(out_lines)
+    truncated = matched_lines > len(tail) or truncated_files
     header = f"[read_logs] service={service} pattern={pattern!r} 返回 {len(tail)} 行" + (
-        f"(共 {len(out_lines)} 行,已截断尾部)" if truncated else ""
+        f"(命中 {matched_lines} 行,已按资源上限截断)" if truncated else ""
     )
     return ToolResult.success(
         header + "\n" + "\n".join(tail),
         service=service,
         pattern=pattern,
         returned_lines=len(tail),
-        matched_lines=len(out_lines),
+        matched_lines=matched_lines,
         matched_files=len(matches),
+        scanned_files=scanned_files,
+        scanned_bytes=scanned_bytes,
         truncated=truncated,
     )
 

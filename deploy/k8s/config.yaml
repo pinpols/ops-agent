@@ -22,6 +22,10 @@ data:
   OPS_QUEUE_DEPTH_ALERT_THRESHOLD: "200"
   OPS_METRICS_FILE: "/var/run/ops-agent/metrics.prom"
   OPS_WORKER_HEARTBEAT_FILE: "/var/run/ops-agent/worker.hb"
+  # 每个 pod 用独立审计文件写入持久卷;见 ingress/worker 中基于 POD_NAME 的覆盖 env。
+  OPS_APPROVAL_LOG: "/var/lib/ops-agent/audit/approvals.jsonl"
+  # prod 下 callback 必须 HTTPS + host allowlist;按实际下游回调域名覆盖。
+  # OPS_CALLBACK_ALLOW_HOSTS: "ops-callback.example.com"
   # 目标系统(只读诊断对象)路径按实际挂载调整
   # OPS_TARGET_ROOT: "/target"
   # OPS_LOG_DIR: "/target/logs"

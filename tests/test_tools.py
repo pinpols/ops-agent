@@ -1,6 +1,7 @@
 """read_logs 工具单测(真读文件,不打 API):功能 + 安全护栏。"""
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,6 +47,8 @@ class ReadLogsTest(unittest.TestCase):
     def test_rejects_invalid_pattern(self):
         self.assertIn("正则非法", tools.read_logs("console", pattern="["))
         self.assertIn("pattern 必须", tools.read_logs("console", pattern=["WARN"]))
+        self.assertIn("过于复杂", tools.read_logs("console", pattern="(a+)+$"))
+        self.assertIn("pattern 过长", tools.read_logs("console", pattern="x" * 129))
 
     def test_rejects_invalid_max_lines(self):
         self.assertIn("必须大于 0", tools.read_logs("console", max_lines=0))
@@ -65,6 +68,16 @@ class ReadLogsTest(unittest.TestCase):
         result = tools.read_logs_result("console")
         self.assertFalse(result.ok)
         self.assertIn("只读挂载", result.to_text())
+
+    def test_read_logs_caps_scanned_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["OPS_LOG_DIR"] = tmp
+            for i in range(tools._LOG_FILE_CAP + 3):
+                Path(tmp, f"console-{i}.log").write_text("WARN capped\n", encoding="utf-8")
+            result = tools.read_logs_result("console", pattern="WARN", max_lines=1000)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.metadata["scanned_files"], tools._LOG_FILE_CAP)
+        self.assertTrue(result.metadata["truncated"])
 
 
 class QueryPgSafetyTest(unittest.TestCase):

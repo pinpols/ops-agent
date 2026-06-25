@@ -39,6 +39,13 @@ spec:
                 name: ops-agent-config
             - secretRef:
                 name: ops-agent-secrets
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPS_APPROVAL_LOG
+              value: "/var/lib/ops-agent/audit/$(POD_NAME)-approvals.jsonl"
           # liveness:进程能服务即存活(后端抖动不重启 pod)
           livenessProbe:
             httpGet:
@@ -74,11 +81,16 @@ spec:
               mountPath: /var/run/ops-agent
             - name: state
               mountPath: /app/.ops-agent
+            - name: audit
+              mountPath: /var/lib/ops-agent/audit
       volumes:
         - name: runtime
           emptyDir: {}
         - name: state
           emptyDir: {}
+        - name: audit
+          persistentVolumeClaim:
+            claimName: ops-agent-audit
 ---
 apiVersion: v1
 kind: Service
@@ -118,3 +130,16 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ops-agent-audit
+  labels:
+    app: ops-agent
+    component: audit
+spec:
+  accessModes: ["ReadWriteMany"]
+  resources:
+    requests:
+      storage: 1Gi

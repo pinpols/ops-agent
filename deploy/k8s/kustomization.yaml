@@ -12,6 +12,7 @@ resources:
   - redis.yaml       # 起步级单实例 Redis + PVC + Service
   - ingress.yaml     # serve Deployment + Service + HPA
   - worker.yaml      # serve-worker Deployment + HPA
+  - networkpolicy.yaml
 
 # 真部署常见覆盖(放到 overlay 里):
 #   images:

@@ -48,6 +48,14 @@ class SystemToolsTest(unittest.TestCase):
         self.assertIn("timeout", result.to_text())
         self.assertEqual(result.metadata["matched_lines"], 1)
 
+    def test_tail_recent_errors_caps_scanned_files(self):
+        for i in range(system_tools._LOG_FILE_CAP + 3):
+            (self.root / "logs" / f"extra-{i}.log").write_text("ERROR capped\n", encoding="utf-8")
+        result = system_tools.tail_recent_errors_result(max_lines=1000)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.metadata["scanned_files"], system_tools._LOG_FILE_CAP)
+        self.assertTrue(result.metadata["truncated"])
+
     def test_inspect_compose_summarizes_runtime_deps(self):
         result = system_tools.inspect_compose_result()
         self.assertTrue(result.ok)

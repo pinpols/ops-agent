@@ -85,6 +85,7 @@ class Settings:
     ops_worker_count: int = 2
     ops_queue_max: int = 100
     ops_callback_url: str | None = None
+    ops_callback_allow_hosts: tuple[str, ...] = ()
     # 事件驱动 Step 2:队列后端。memory=进程内(默认);redis=真队列 + 独立 worker 进程 + DLQ。
     ops_queue_backend: str = "memory"
     ops_redis_url: str | None = None
@@ -182,6 +183,9 @@ class Settings:
             ops_worker_count=int(os.environ.get("OPS_WORKER_COUNT", "2")),
             ops_queue_max=int(os.environ.get("OPS_QUEUE_MAX", "100")),
             ops_callback_url=os.environ.get("OPS_CALLBACK_URL"),
+            ops_callback_allow_hosts=tuple(
+                host.lower() for host in _env_csv("OPS_CALLBACK_ALLOW_HOSTS")
+            ),
             ops_queue_backend=os.environ.get("OPS_QUEUE_BACKEND", "memory").strip().lower(),
             ops_redis_url=os.environ.get("OPS_REDIS_URL"),
             ops_queue_key=os.environ.get("OPS_QUEUE_KEY", "ops:queue"),

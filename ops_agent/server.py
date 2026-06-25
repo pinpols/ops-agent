@@ -13,23 +13,28 @@
 """
 
 import hmac
+import ipaddress
 import json
 import logging
 import re
 import signal
+import socket
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import urlparse
 
 from ops_agent import __version__
 from ops_agent.budget import BudgetExceeded
-from ops_agent.config import get_settings
+from ops_agent.config import Settings, get_settings
 from ops_agent.metrics import METRICS
 from ops_agent.prompts import PROMPT_VERSION
 
 logger = logging.getLogger("ops_agent.server")
 
 _MAX_BODY_BYTES = 64 * 1024  # webhook body 上限,防超大 payload
+_MAX_QUESTION_CHARS = 8192
+_TARGET_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _deny_all_approver(tool_name: str, tool_input: dict) -> bool:
@@ -58,12 +63,33 @@ def _payload_trace_id(payload: dict[str, Any]) -> str:
     return uuid.uuid4().hex
 
 
-def handle_diagnose(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    """处理 /diagnose 业务(鉴权之后调用)。返回 (http_status, json_body)。只读、注入全拒审批闸。"""
+def _validate_question_target(
+    payload: dict[str, Any],
+) -> tuple[str | None, str | None, dict[str, Any] | None]:
     question = payload.get("question")
     if not isinstance(question, str) or not question.strip():
-        return 400, {"error": "缺 question(非空字符串)"}
+        return None, None, {"error": "缺 question(非空字符串)"}
+    question = question.strip()
+    if len(question) > _MAX_QUESTION_CHARS:
+        return None, None, {"error": "question_too_long", "max_chars": _MAX_QUESTION_CHARS}
     target = payload.get("target")
+    if target is None or target == "":
+        return question, None, None
+    if not isinstance(target, str) or not _TARGET_RE.match(target.strip()):
+        return (
+            None,
+            None,
+            {"error": "invalid_target", "detail": "target 只允许 1-64 位字母/数字/_/-"},
+        )
+    return question, target.strip(), None
+
+
+def handle_diagnose(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """处理 /diagnose 业务(鉴权之后调用)。返回 (http_status, json_body)。只读、注入全拒审批闸。"""
+    question, target, error = _validate_question_target(payload)
+    if error:
+        return 400, error
+    assert question is not None
     trace_id = _payload_trace_id(payload)
     # 延迟 import:避免 server 模块 import 期就拉起 LLM 依赖链(健康探针应轻)。
     from ops_agent.agent import run_agent
@@ -110,9 +136,19 @@ def _post_callback(
     error: str | None = None,
 ) -> None:
     """配了 OPS_CALLBACK_URL 就把结果 POST 过去(成功/失败均回调,best-effort,失败只 warn)。"""
-    url = get_settings().ops_callback_url
-    if not url or not url.startswith(("http://", "https://")):
+    settings = get_settings()
+    url = settings.ops_callback_url
+    allowed, reason = _callback_url_allowed(url, settings)
+    if not allowed:
+        if url:
+            logger.warning(
+                "回调 URL 被安全策略拒绝 job_id=%s trace_id=%s reason=%s",
+                job.id,
+                job.trace_id,
+                reason,
+            )
         return
+    assert url is not None
     import urllib.request
 
     body = json.dumps(
@@ -133,6 +169,55 @@ def _post_callback(
         logger.warning(
             "回调投递失败 job_id=%s trace_id=%s url=%s: %s", job.id, job.trace_id, url, exc
         )
+
+
+def _callback_url_allowed(url: str | None, settings: Settings) -> tuple[bool, str]:
+    if not url:
+        return False, "not_configured"
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False, "callback_url_must_be_http_or_https"
+    host = parsed.hostname.lower()
+    if settings.ops_callback_allow_hosts and host not in settings.ops_callback_allow_hosts:
+        return False, "callback_host_not_in_allowlist"
+    if settings.production:
+        if parsed.scheme != "https":
+            return False, "prod_callback_requires_https"
+        if not settings.ops_callback_allow_hosts:
+            return False, "prod_callback_requires_allowlist"
+        ok, reason = _callback_host_is_public(host, parsed.port)
+        if not ok:
+            return False, reason
+    return True, "ok"
+
+
+def _callback_host_is_public(host: str, port: int | None = None) -> tuple[bool, str]:
+    try:
+        addresses = [ipaddress.ip_address(host.strip("[]"))]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, port or 443, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            return False, "callback_host_dns_failed"
+        addresses = []
+        for info in infos:
+            try:
+                addresses.append(ipaddress.ip_address(info[4][0]))
+            except ValueError:
+                return False, "callback_host_unparseable_address"
+    if not addresses:
+        return False, "callback_host_no_addresses"
+    for address in addresses:
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_unspecified
+        ):
+            return False, "callback_host_resolves_to_non_public_ip"
+    return True, "ok"
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -235,12 +320,13 @@ class _Handler(BaseHTTPRequestHandler):
         # 异步模式:入队 + 立即 202(消掉同步阻塞告警 webhook);队列满 → 429 背压。
         jq = getattr(self.server, "job_queue", None)
         if jq is not None:
-            question = payload.get("question")
-            if not isinstance(question, str) or not question.strip():
-                self._send(400, {"error": "缺 question(非空字符串)"})
+            question, target, error = _validate_question_target(payload)
+            if error:
+                self._send(400, error)
                 return
             trace_id = _payload_trace_id(payload)
-            job = jq.submit(question, payload.get("target"), trace_id=trace_id)
+            assert question is not None
+            job = jq.submit(question, target, trace_id=trace_id)
             if job is None:
                 METRICS.inc("webhook_queue_full_total")
                 self._send(429, {"error": "queue_full", "detail": "稍后重试", "trace_id": trace_id})

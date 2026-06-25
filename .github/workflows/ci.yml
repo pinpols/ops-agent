@@ -61,6 +61,9 @@ jobs:
       - name: Build Docker image
         run: docker build -t ops-agent:ci .
 
+      - name: Smoke Docker redis backend import
+        run: docker run --rm --entrypoint python ops-agent:ci -c "import ops_agent.redisqueue"
+
   audit:
     runs-on: ubuntu-latest
     steps:

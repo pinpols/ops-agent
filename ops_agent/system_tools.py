@@ -1,11 +1,12 @@
 """System-aware read-only tools for the target batch system."""
 
 import re
+from collections import deque
 from pathlib import Path
 
 from ops_agent.config import get_settings
 from ops_agent.tool_result import ToolResult
-from ops_agent.tools import _coerce_positive_limit
+from ops_agent.tools import _LOG_FILE_CAP, _LOG_SCAN_BYTES, _coerce_positive_limit, _iter_tail_lines
 
 # 服务名白名单:只允许小写字母/数字/连字符,挡掉路径穿越(.. / / / 空字节)。
 # 否则模型(或被注入的日志/配置内容)可诱导 read_app_config 读 OPS_TARGET_ROOT 外的任意文件。
@@ -108,13 +109,20 @@ def tail_recent_errors_result(max_lines: int = 200) -> ToolResult:
             f"[tail_recent_errors] 日志目录不存在:{log_dir}", log_dir=str(log_dir)
         )
 
-    hits: list[str] = []
-    for path in sorted(log_dir.glob("*.log")):
+    log_files = sorted(log_dir.glob("*.log"))
+    hits: deque[str] = deque(maxlen=limit)
+    matched_lines = 0
+    scanned_files = 0
+    scanned_bytes = 0
+    truncated_files = len(log_files) > _LOG_FILE_CAP
+    for path in log_files[:_LOG_FILE_CAP]:
+        scanned_files += 1
         try:
-            with path.open(encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    if any(pattern in line for pattern in _ERROR_PATTERNS):
-                        hits.append(f"{path.name}: {line.rstrip()}")
+            scanned_bytes += min(path.stat().st_size, _LOG_SCAN_BYTES)
+            for line in _iter_tail_lines(path):
+                if any(pattern in line for pattern in _ERROR_PATTERNS):
+                    matched_lines += 1
+                    hits.append(f"{path.name}: {line}")
         except OSError as e:
             hits.append(f"{path.name}: [读取失败] {e}")
 
@@ -124,16 +132,19 @@ def tail_recent_errors_result(max_lines: int = 200) -> ToolResult:
             log_dir=str(log_dir),
         )
 
-    tail = hits[-limit:]
+    tail = list(hits)
+    truncated = matched_lines > len(tail) or truncated_files
     header = f"[tail_recent_errors] 返回 {len(tail)} 行" + (
-        f"(共 {len(hits)} 行,已截断尾部)" if len(hits) > limit else ""
+        f"(命中 {matched_lines} 行,已按资源上限截断)" if truncated else ""
     )
     return ToolResult.success(
         header + "\n" + "\n".join(tail),
         log_dir=str(log_dir),
-        matched_lines=len(hits),
+        matched_lines=matched_lines,
         returned_lines=len(tail),
-        truncated=len(hits) > limit,
+        scanned_files=scanned_files,
+        scanned_bytes=scanned_bytes,
+        truncated=truncated,
     )
 
 

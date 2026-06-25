@@ -13,7 +13,7 @@ COPY pyproject.toml README.md requirements.txt requirements.lock ./
 COPY ops_agent ./ops_agent
 COPY evals ./evals
 RUN awk '/^[A-Za-z0-9_.-]+==/ { sub(/[[:space:]]+\\$/, ""); print }' requirements.lock > /tmp/constraints.txt \
-    && pip install --no-cache-dir -c /tmp/constraints.txt -e . \
+    && pip install --no-cache-dir -c /tmp/constraints.txt -e ".[redis]" \
     && mkdir -p /var/run/ops-agent /app/.ops-agent
 
 # 非 root 运行(最小权限);只读根文件系统时 .ops-agent / metrics 目录需可写挂载
