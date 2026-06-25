@@ -149,7 +149,11 @@ class Settings:
             ops_approval_log=Path(
                 os.environ.get("OPS_APPROVAL_LOG", DEFAULT_APPROVAL_LOG)
             ).resolve(),
-            ops_redact_artifacts=_env_bool("OPS_REDACT_ARTIFACTS", default=True),
+            # prod 强制脱敏:即便显式 OPS_REDACT_ARTIFACTS=false 也不放行(fail-closed,
+            # 与 ops_sql_allow_free 同款 prod 安全闸,防止 artifact 明文外泄)。
+            ops_redact_artifacts=(
+                _env_bool("OPS_REDACT_ARTIFACTS", default=True) or profile == "prod"
+            ),
             ops_redaction_rules_file=(
                 Path(os.environ["OPS_REDACTION_RULES_FILE"]).resolve()
                 if os.environ.get("OPS_REDACTION_RULES_FILE")

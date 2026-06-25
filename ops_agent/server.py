@@ -15,6 +15,7 @@
 import hmac
 import json
 import logging
+import re
 import signal
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,9 +47,15 @@ def authorize(auth_header: str | None, expected_token: str | None) -> bool:
     return hmac.compare_digest(presented, expected_token)
 
 
+_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
 def _payload_trace_id(payload: dict[str, Any]) -> str:
+    # 用户可控:限长 + 字符白名单,防超长串撑 Redis/SQLite + 日志注入;不合规则自生成。
     value = payload.get("trace_id")
-    return value.strip() if isinstance(value, str) and value.strip() else uuid.uuid4().hex
+    if isinstance(value, str) and _TRACE_ID_RE.match(value.strip()):
+        return value.strip()
+    return uuid.uuid4().hex
 
 
 def handle_diagnose(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -146,6 +153,15 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:  # 静音默认 stderr 噪声,走 logger
         logger.info("%s - %s", self.address_string(), fmt % args)
 
+    def _authorized(self) -> bool:
+        """Bearer 鉴权:token 启动时快照到 server(未配则 fail-closed)。/diagnose 与 /jobs 共用。"""
+        expected = getattr(self.server, "expected_token", None)
+        if authorize(self.headers.get("Authorization"), expected):
+            return True
+        METRICS.inc("webhook_unauthorized_total")
+        self._send(401, {"error": "unauthorized"})
+        return False
+
     def do_GET(self) -> None:
         if self.path == "/healthz":
             self._send(
@@ -163,7 +179,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not_found"})
 
     def _handle_job_status(self, job_id: str) -> None:
-        """异步任务状态查询 GET /jobs/{id}。无队列(同步模式)→ 404。"""
+        """异步任务状态查询 GET /jobs/{id}。需鉴权(否则诊断结果裸泄露);无队列→404。"""
+        if not self._authorized():  # 安全:/jobs 与 /diagnose 同等鉴权,防越权读他人诊断
+            return
         jq = getattr(self.server, "job_queue", None)
         if jq is None:
             self._send(404, {"error": "async_mode_disabled"})
@@ -178,12 +196,7 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/diagnose":
             self._send(404, {"error": "not_found"})
             return
-        # token 在 serve() 启动时快照到 server 上(一致 + 避免每请求重读密钥文件);
-        # 直接构造 server(测试)时无该属性 → None → fail-closed。
-        expected = getattr(self.server, "expected_token", None)
-        if not authorize(self.headers.get("Authorization"), expected):
-            METRICS.inc("webhook_unauthorized_total")
-            self._send(401, {"error": "unauthorized"})
+        if not self._authorized():
             return
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")

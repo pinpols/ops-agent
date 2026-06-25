@@ -91,6 +91,17 @@ class QueryPgSafetyTest(unittest.TestCase):
             tools.query_pg("with x as (delete from t returning *) select * from x"),
         )
 
+    def test_rejects_sql_comments(self):
+        # 注释用于拆词绕过关键词黑名单 / 行注释截句,一律拒绝(对抗审查 H3)
+        for sql in (
+            "select pg_/**/read_file('/etc/passwd')",
+            "select 1 -- drop table t",
+            "select 1 /* hidden */ from t",
+            "select 1 # mysql-style",
+        ):
+            out = tools.query_pg(sql)
+            self.assertIn("注释", out, sql)
+
     def test_select_passes_guard_then_needs_dsn(self):
         # 合法 SELECT 过了字符串闸 → 因没配 DSN 停下(证明 guard 放行了合法查询)
         self.assertIn("OPS_PG_DSN", tools.query_pg("select count(*) from batch.job_instance"))

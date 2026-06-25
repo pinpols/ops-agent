@@ -168,9 +168,11 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
         deadline = time.time() + 3
         final = None
         while time.time() < deadline:
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{self.port}/jobs/{job_id}", timeout=5
-            ) as r:
+            poll = urllib.request.Request(
+                f"http://127.0.0.1:{self.port}/jobs/{job_id}",
+                headers={"Authorization": "Bearer tok"},
+            )
+            with urllib.request.urlopen(poll, timeout=5) as r:
                 final = json.loads(r.read())
             if final["status"] in ("succeeded", "failed"):
                 break
@@ -181,9 +183,20 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
         self.assertEqual(final["result"]["diagnosis"]["severity"], "WARNING")
 
     def test_unknown_job_404(self):
+        # 带正确 token → 走到存在性判断,未知 job 返 404
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/jobs/nope",
+            headers={"Authorization": "Bearer tok"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 404)
+
+    def test_jobs_requires_auth(self):
+        # C1 回归:/jobs 与 /diagnose 同等鉴权,无 token 越权读他人诊断被拦
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(f"http://127.0.0.1:{self.port}/jobs/nope", timeout=5)
-        self.assertEqual(ctx.exception.code, 404)
+        self.assertEqual(ctx.exception.code, 401)
 
     def test_callback_includes_trace_id(self):
         received = []
