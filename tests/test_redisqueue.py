@@ -78,6 +78,18 @@ class RedisQueueTest(unittest.TestCase):
         rq = _rq()
         self.assertIsNone(rq.consume(timeout=1))
 
+    def test_update_queue_metrics_emits_backlog_and_dlq_gauges(self):
+        from ops_agent.metrics import METRICS
+
+        rq = _rq(max_retries=0)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.fail_or_retry(job.id, "x")  # max_retries=0 → 直接死信
+        text = METRICS.render()
+        self.assertIn("# TYPE ops_agent_dlq_size gauge", text)
+        self.assertIn("# TYPE ops_agent_retry_backlog gauge", text)
+        self.assertIn('ops_agent_dlq_size{backend="redis"} 1.0', text)
+
 
 class WorkerProcessOnceTest(unittest.TestCase):
     def test_process_once_succeeds(self):
@@ -100,6 +112,16 @@ class WorkerProcessOnceTest(unittest.TestCase):
         self.assertEqual(outcome, "dead")  # max_retries=0 → 直接死信
         self.assertEqual(rq.get(job.id).status, FAILED)
         self.assertEqual(rq.dlq_size(), 1)
+
+    def test_process_once_records_duration_histogram(self):
+        from ops_agent.metrics import METRICS
+
+        rq = _rq()
+        rq.submit("hello")
+        process_once(rq, lambda j: {"ok": True}, timeout=1)
+        text = METRICS.render()
+        self.assertIn("# TYPE ops_agent_job_duration_seconds histogram", text)
+        self.assertIn('ops_agent_job_duration_seconds_count{backend="redis"}', text)
 
     def test_process_once_empty_returns_none(self):
         rq = _rq()
