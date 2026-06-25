@@ -8,11 +8,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 先装依赖(利用层缓存),再拷源码
-COPY pyproject.toml README.md requirements.txt ./
+# 先装依赖(利用层缓存),再拷源码;从 hash lock 派生 constraints,锁住生产镜像传递依赖版本。
+COPY pyproject.toml README.md requirements.txt requirements.lock ./
 COPY ops_agent ./ops_agent
 COPY evals ./evals
-RUN pip install --no-cache-dir -e . \
+RUN awk '/^[A-Za-z0-9_.-]+==/ { sub(/[[:space:]]+\\$/, ""); print }' requirements.lock > /tmp/constraints.txt \
+    && pip install --no-cache-dir -c /tmp/constraints.txt -e . \
     && mkdir -p /var/run/ops-agent /app/.ops-agent
 
 # 非 root 运行(最小权限);只读根文件系统时 .ops-agent / metrics 目录需可写挂载

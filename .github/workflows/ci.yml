@@ -37,6 +37,30 @@ jobs:
         # 实测 76%;闸设 70 留 6pt 余量防回退,后续补 run_eval/graph_agent 测试再上调。
         run: pytest --cov=ops_agent --cov=evals --cov-report=term-missing --cov-fail-under=70
 
+      - name: Build wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          wheels = sorted(Path("dist").glob("ops_agent-*.whl"))
+          assert wheels, "wheel was not produced"
+          with zipfile.ZipFile(wheels[-1]) as wheel:
+              names = set(wheel.namelist())
+          assert "ops_agent/sql_templates/manifest.json" in names
+          assert any(name.startswith("ops_agent/sql_templates/") and name.endswith(".sql") for name in names)
+          PY
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t ops-agent:ci .
+
   audit:
     runs-on: ubuntu-latest
     steps:
