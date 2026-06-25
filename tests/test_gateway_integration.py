@@ -45,6 +45,21 @@ def test_reconstruct_rebuilds_tool_use_from_raw():
     assert tu.input == {"severity": "WARNING"}
 
 
+def test_reconstruct_blocks_are_dual_access():
+    # 多轮工具对话回归:还原的块既要支持属性(ops-agent 读 b.type/b.input),
+    # 又要支持字典(网关 openai 互译按 b.get('type') 读),否则 round2+ 在 deepseek 上炸。
+    normalized = SimpleNamespace(
+        raw={
+            "content": [{"type": "tool_use", "id": "c1", "name": "read_logs", "input": {"s": "x"}}],
+            "stop_reason": "tool_use",
+            "usage": {},
+        }
+    )
+    b = llm.reconstruct_response(normalized).content[0]
+    assert b.type == "tool_use" and b.input == {"s": "x"}  # 属性访问
+    assert b.get("type") == "tool_use" and b["name"] == "read_logs"  # 字典访问
+
+
 def test_reconstruct_falls_back_to_text_when_no_raw():
     normalized = SimpleNamespace(
         raw=None, text="hello", finish_reason="end_turn", input_tokens=3, output_tokens=1

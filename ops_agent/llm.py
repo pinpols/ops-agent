@@ -19,6 +19,13 @@ from anthropic import Anthropic
 from ops_agent.config import get_settings
 
 
+class _Block(dict):
+    """双访问内容块:既支持属性(``b.type`` / ``b.input``,ops-agent 消费用),
+    又是 dict(``b.get('type')``,网关 openai 互译 tooltrans 用)。多轮工具对话两端都要。"""
+
+    __getattr__ = dict.get
+
+
 class LLMClient(Protocol):
     """``make_client()`` 返回契约:有 ``messages`` 且 ``.create(**kwargs)`` 返回原生形状响应。"""
 
@@ -81,7 +88,10 @@ def reconstruct_response(normalized: Any) -> SimpleNamespace:
                 "output_tokens": getattr(normalized, "output_tokens", 0),
             },
         }
-    content = [SimpleNamespace(**block) for block in raw.get("content", [])]
+    # 块用**双访问**对象:ops-agent 读 b.type/b.input(属性),而这些块会被原样塞进下一轮
+    # 请求的 assistant 消息——网关 openai 互译(tooltrans)按 b.get('type') 读(字典)。
+    # 二者都要支持,否则多轮(round2+)工具对话在 openai/deepseek provider 上炸。
+    content = [_Block(block) for block in raw.get("content", [])]
     usage = raw.get("usage") or {}
     return SimpleNamespace(
         content=content,
