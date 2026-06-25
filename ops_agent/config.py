@@ -80,6 +80,11 @@ class Settings:
     ops_history_db: Path | None = None
     ops_history_retention_days: int = 90
     ops_history_max_rows: int = 100_000
+    # 事件驱动 Step 1:异步 webhook(入队 + 202 + worker 池)。默认关=同步内联(零回归)。
+    ops_async_diagnose: bool = False
+    ops_worker_count: int = 2
+    ops_queue_max: int = 100
+    ops_callback_url: str | None = None
 
     @property
     def langfuse_enabled(self) -> bool:
@@ -157,6 +162,10 @@ class Settings:
             ),
             ops_history_retention_days=int(os.environ.get("OPS_HISTORY_RETENTION_DAYS", "90")),
             ops_history_max_rows=int(os.environ.get("OPS_HISTORY_MAX_ROWS", "100000")),
+            ops_async_diagnose=_env_bool("OPS_ASYNC_DIAGNOSE"),
+            ops_worker_count=int(os.environ.get("OPS_WORKER_COUNT", "2")),
+            ops_queue_max=int(os.environ.get("OPS_QUEUE_MAX", "100")),
+            ops_callback_url=os.environ.get("OPS_CALLBACK_URL"),
         )
 
 

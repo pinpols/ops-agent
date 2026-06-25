@@ -1,0 +1,143 @@
+"""进程内诊断任务队列 + 异步 worker(架构演进 Step 1:解耦同步阻塞 webhook)。
+
+事件驱动第一步,零中间件:webhook 入队 → 立即 202 → worker 线程池异步跑 handler。
+- **有界队列**:满则 `submit` 返回 None(背压信号),上游回 429,不堆积。
+- **有界结果缓存**:`OrderedDict` 上限淘汰最旧,防内存无界增长。
+- **优雅停机**:`shutdown` 置停 + join,排空在途任务。
+
+Step 2 会把 `queue.Queue` 换成 Redis/SQS 并把 worker 拆成独立进程;本模块接口保持稳定。
+"""
+
+import logging
+import queue
+import threading
+import time
+import uuid
+from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from ops_agent.metrics import METRICS
+
+logger = logging.getLogger("ops_agent.jobqueue")
+
+# 任务状态机:queued → running → succeeded / failed
+QUEUED = "queued"
+RUNNING = "running"
+SUCCEEDED = "succeeded"
+FAILED = "failed"
+
+
+@dataclass
+class DiagnosisJob:
+    id: str
+    question: str
+    target: str | None = None
+    status: str = QUEUED
+    result: dict | None = None
+    error: str | None = None
+    created_at: float = field(default_factory=time.time)
+
+    def to_public(self) -> dict[str, Any]:
+        """对外 JSON(查询端点用)。"""
+        return {
+            "job_id": self.id,
+            "status": self.status,
+            "target": self.target,
+            "created_at": self.created_at,
+            "result": self.result,
+            "error": self.error,
+        }
+
+
+class JobQueue:
+    """进程内有界任务队列 + worker 线程池。handler(job) 返回 dict 结果。"""
+
+    def __init__(
+        self,
+        handler: Callable[[DiagnosisJob], dict],
+        *,
+        workers: int = 2,
+        max_queue: int = 100,
+        max_results: int = 1000,
+    ) -> None:
+        self._handler = handler
+        self._q: queue.Queue[str] = queue.Queue(maxsize=max(1, max_queue))
+        self._jobs: OrderedDict[str, DiagnosisJob] = OrderedDict()
+        self._max_results = max(1, max_results)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+        for i in range(max(1, workers)):
+            t = threading.Thread(target=self._worker_loop, name=f"diag-worker-{i}", daemon=True)
+            t.start()
+            self._threads.append(t)
+
+    def submit(self, question: str, target: str | None = None) -> DiagnosisJob | None:
+        """入队一个诊断任务。队列满 → 返回 None(背压,上游应回 429)。"""
+        job = DiagnosisJob(id=uuid.uuid4().hex, question=question, target=target)
+        with self._lock:
+            self._jobs[job.id] = job
+            self._evict_locked()
+        try:
+            self._q.put_nowait(job.id)
+        except queue.Full:
+            with self._lock:
+                self._jobs.pop(job.id, None)
+            METRICS.inc("jobs_rejected_total")  # 背压:队列满拒收
+            return None
+        METRICS.inc("jobs_submitted_total")
+        return job
+
+    def get(self, job_id: str) -> DiagnosisJob | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def qsize(self) -> int:
+        return self._q.qsize()
+
+    def _evict_locked(self) -> None:
+        # 结果缓存上限:超出则从最旧开始淘汰(已 succeeded/failed 优先,但简化为 FIFO)。
+        while len(self._jobs) > self._max_results:
+            self._jobs.popitem(last=False)
+
+    def _set_status(self, job_id: str, status: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                job.status = status
+
+    def _worker_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                job_id = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                job = self.get(job_id)
+                if job is None:
+                    continue
+                self._set_status(job_id, RUNNING)
+                try:
+                    result = self._handler(job)
+                    with self._lock:
+                        if job_id in self._jobs:
+                            self._jobs[job_id].result = result
+                            self._jobs[job_id].status = SUCCEEDED
+                    METRICS.inc("jobs_succeeded_total")
+                except Exception as exc:  # noqa: BLE001 - worker 边界:任务失败不拖垮 worker
+                    logger.exception("诊断任务失败 job_id=%s", job_id)
+                    with self._lock:
+                        if job_id in self._jobs:
+                            self._jobs[job_id].error = f"{type(exc).__name__}: {exc}"
+                            self._jobs[job_id].status = FAILED
+                    METRICS.inc("jobs_failed_total")
+            finally:
+                self._q.task_done()
+
+    def shutdown(self, timeout: float = 10.0) -> None:
+        """置停并 join worker(排空在途)。"""
+        self._stop.set()
+        for t in self._threads:
+            t.join(timeout=timeout)

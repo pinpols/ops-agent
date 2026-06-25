@@ -68,6 +68,37 @@ def handle_diagnose(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return 200, {"diagnosis": diagnosis.model_dump(mode="json")}
 
 
+def diagnosis_job_handler(job: Any) -> dict[str, Any]:
+    """worker 端任务处理:跑只读诊断 → 结果 dict。异常抛出由 JobQueue 标记 FAILED。
+
+    与同步 `handle_diagnose` 共用同一只读内核(注入全拒审批闸);成功后可选回调。
+    """
+    from ops_agent.agent import run_agent
+
+    q = f"[target={job.target}] {job.question}" if job.target else job.question
+    diagnosis = run_agent(q, approver=_deny_all_approver)[0]
+    result = {"diagnosis": diagnosis.model_dump(mode="json")}
+    _post_callback(job, result)
+    return result
+
+
+def _post_callback(job: Any, result: dict[str, Any]) -> None:
+    """配了 OPS_CALLBACK_URL 就把结果 POST 过去(best-effort,失败只 warn,不影响任务成败)。"""
+    url = get_settings().ops_callback_url
+    if not url or not url.startswith(("http://", "https://")):
+        return
+    import urllib.request
+
+    body = json.dumps({"job_id": job.id, "status": "succeeded", "result": result}).encode("utf-8")
+    req = urllib.request.Request(  # noqa: S310
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10).close()  # noqa: S310
+    except Exception as exc:  # noqa: BLE001 - 回调是 best-effort,失败不该影响诊断结果
+        logger.warning("回调投递失败 job_id=%s url=%s: %s", job.id, url, exc)
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = f"ops-agent/{__version__}"
 
@@ -93,8 +124,22 @@ class _Handler(BaseHTTPRequestHandler):
             )
         elif self.path == "/metrics":
             self._send(200, text=METRICS.render())
+        elif self.path.startswith("/jobs/"):
+            self._handle_job_status(self.path[len("/jobs/") :])
         else:
             self._send(404, {"error": "not_found"})
+
+    def _handle_job_status(self, job_id: str) -> None:
+        """异步任务状态查询 GET /jobs/{id}。无队列(同步模式)→ 404。"""
+        jq = getattr(self.server, "job_queue", None)
+        if jq is None:
+            self._send(404, {"error": "async_mode_disabled"})
+            return
+        job = jq.get(job_id)
+        if job is None:
+            self._send(404, {"error": "job_not_found"})
+            return
+        self._send(200, job.to_public())
 
     def do_POST(self) -> None:
         if self.path != "/diagnose":
@@ -125,6 +170,21 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "body must be a JSON object"})
             return
         METRICS.inc("webhook_diagnose_total")
+        # 异步模式:入队 + 立即 202(消掉同步阻塞告警 webhook);队列满 → 429 背压。
+        jq = getattr(self.server, "job_queue", None)
+        if jq is not None:
+            question = payload.get("question")
+            if not isinstance(question, str) or not question.strip():
+                self._send(400, {"error": "缺 question(非空字符串)"})
+                return
+            job = jq.submit(question, payload.get("target"))
+            if job is None:
+                METRICS.inc("webhook_queue_full_total")
+                self._send(429, {"error": "queue_full", "detail": "稍后重试"})
+                return
+            self._send(202, {"job_id": job.id, "status": job.status})
+            return
+        # 同步模式(默认):内联跑完返回(向后兼容)。
         status, body = handle_diagnose(payload)
         self._send(status, body)
 
@@ -132,9 +192,24 @@ class _Handler(BaseHTTPRequestHandler):
 def serve(host: str = "0.0.0.0", port: int = 8080) -> None:  # noqa: S104 - 容器内监听 0.0.0.0
     """启动阻塞式 HTTP 服务,SIGINT / SIGTERM 均优雅退出(容器 docker stop / k8s 驱逐发 SIGTERM)。"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    settings = get_settings()
     httpd = ThreadingHTTPServer((host, port), _Handler)
     # 鉴权 token 启动时快照一次:一致(密钥轮换不会让并发请求读到半新半旧)+ 避免每请求重读密钥文件。
-    httpd.expected_token = get_settings().ops_webhook_token  # type: ignore[attr-defined]
+    httpd.expected_token = settings.ops_webhook_token  # type: ignore[attr-defined]
+    # 异步模式:拉起 worker 池 + 队列,/diagnose 转入队 202(事件驱动 Step 1)。
+    job_queue = None
+    if settings.ops_async_diagnose:
+        from ops_agent.jobqueue import JobQueue
+
+        job_queue = JobQueue(
+            diagnosis_job_handler,
+            workers=settings.ops_worker_count,
+            max_queue=settings.ops_queue_max,
+        )
+        httpd.job_queue = job_queue  # type: ignore[attr-defined]
+        logger.info(
+            "async 模式:workers=%d queue_max=%d", settings.ops_worker_count, settings.ops_queue_max
+        )
     # SIGTERM(docker stop / k8s)默认直接终止、不跑 finally;转成 KeyboardInterrupt 走优雅退出。
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     logger.info("ops-agent serve on %s:%d (version=%s)", host, port, __version__)
@@ -143,6 +218,8 @@ def serve(host: str = "0.0.0.0", port: int = 8080) -> None:  # noqa: S104 - 容�
     except KeyboardInterrupt:
         logger.info("收到停止信号,优雅退出")
     finally:
+        if job_queue is not None:
+            job_queue.shutdown()  # 排空在途任务
         httpd.shutdown()
         httpd.server_close()
 

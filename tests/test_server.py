@@ -122,5 +122,58 @@ class HttpEndToEndTest(unittest.TestCase):
             self.assertEqual(json.loads(resp.read())["diagnosis"]["severity"], "WARNING")
 
 
+class AsyncDiagnoseHttpTest(unittest.TestCase):
+    """事件驱动 Step 1:/diagnose 入队 → 202 + job_id,/jobs/{id} 轮询到结果。"""
+
+    def setUp(self):
+        from ops_agent.jobqueue import JobQueue
+
+        # 假 handler:不打 LLM,直接回结果(验证 HTTP 异步管道:202 + 入队 + 查询)
+        self.jq = JobQueue(lambda job: {"diagnosis": {"severity": job.question}}, workers=1)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server._Handler)
+        self.httpd.expected_token = "tok"
+        self.httpd.job_queue = self.jq
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.jq.shutdown()
+
+    def test_async_returns_202_then_pollable_to_succeeded(self):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/diagnose",
+            data=b'{"question":"WARNING","target":"fbs"}',
+            method="POST",
+            headers={"Authorization": "Bearer tok"},
+        )
+        resp = urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(resp.status, 202)
+        job_id = json.loads(resp.read())["job_id"]
+
+        # 轮询 /jobs/{id} 直到 succeeded
+        import time
+
+        deadline = time.time() + 3
+        final = None
+        while time.time() < deadline:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/jobs/{job_id}", timeout=5
+            ) as r:
+                final = json.loads(r.read())
+            if final["status"] in ("succeeded", "failed"):
+                break
+            time.sleep(0.02)
+        self.assertEqual(final["status"], "succeeded")
+        self.assertEqual(final["result"]["diagnosis"]["severity"], "WARNING")
+
+    def test_unknown_job_404(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/jobs/nope", timeout=5)
+        self.assertEqual(ctx.exception.code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()
