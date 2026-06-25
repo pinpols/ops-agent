@@ -17,6 +17,8 @@ import time
 import uuid
 from typing import Any
 
+from redis.exceptions import WatchError
+
 from ops_agent.jobqueue import FAILED, QUEUED, RUNNING, SUCCEEDED, DiagnosisJob
 from ops_agent.metrics import METRICS
 
@@ -62,8 +64,8 @@ class RedisQueue:
     def _job_key(self, job_id: str) -> str:
         return _JOB_PREFIX + job_id
 
-    def _store(self, job: DiagnosisJob) -> None:
-        mapping = {
+    def _mapping(self, job: DiagnosisJob) -> dict[str, str]:
+        return {
             "question": job.question,
             "trace_id": job.trace_id,
             "target": job.target or "",
@@ -73,8 +75,10 @@ class RedisQueue:
             "created_at": str(job.created_at),
             "attempts": str(job.attempts),
         }
+
+    def _store(self, job: DiagnosisJob) -> None:
         key = self._job_key(job.id)
-        self._r.hset(key, mapping=mapping)
+        self._r.hset(key, mapping=self._mapping(job))
         self._r.expire(key, self._job_ttl)
 
     def _load(self, job_id: str) -> DiagnosisJob | None:
@@ -97,19 +101,36 @@ class RedisQueue:
     def submit(
         self, question: str, target: str | None = None, trace_id: str | None = None
     ) -> DiagnosisJob | None:
-        """入队。队列长度达上限 → 返回 None(背压)。"""
-        if self._r.llen(self._queue_key) >= self._max_queue:
-            METRICS.inc("jobs_rejected_total")
-            self.update_queue_metrics()
-            return None
+        """入队。队列长度达上限 → 返回 None(背压)。
+
+        **原子**:WATCH 队列 → 校验长度 → MULTI(hset+expire+lpush)EXEC。多 ingress 并发时
+        背压是硬上限(不会超),且 store 与 lpush 同事务提交,不会留"有 hash 无队列项"的孤儿。
+        """
         job = DiagnosisJob(
             id=uuid.uuid4().hex,
             question=question,
             trace_id=trace_id or uuid.uuid4().hex,
             target=target,
         )
-        self._store(job)
-        self._r.lpush(self._queue_key, job.id)
+        job_key = self._job_key(job.id)
+        mapping = self._mapping(job)
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(self._queue_key)
+                    if pipe.llen(self._queue_key) >= self._max_queue:
+                        pipe.reset()
+                        METRICS.inc("jobs_rejected_total")
+                        self.update_queue_metrics()
+                        return None
+                    pipe.multi()
+                    pipe.hset(job_key, mapping=mapping)
+                    pipe.expire(job_key, self._job_ttl)
+                    pipe.lpush(self._queue_key, job.id)
+                    pipe.execute()
+                    break
+                except WatchError:
+                    continue  # 队列被并发改 → 重试整段(乐观锁)
         METRICS.inc("jobs_submitted_total")
         self.update_queue_metrics()
         return job
@@ -200,13 +221,28 @@ class RedisQueue:
         return int(self._r.llen(self._dlq_key))
 
     def dlq_requeue(self, job_id: str) -> bool:
-        """把一个死信任务移回主队列(重置 attempts)。"""
-        removed = self._r.lrem(self._dlq_key, 1, job_id)
-        if not removed:
-            return False
+        """把一个死信任务移回主队列(重置 attempts)。
+
+        **原子**:WATCH dlq → 确认 job 在 dlq → MULTI(lrem+hset+lpush)EXEC。避免"从 dlq 删除但
+        未回主队列"的丢失,也避免 lrem 删 0 却仍 hset/lpush(把非死信任务误入队)。
+        """
+        job_key = self._job_key(job_id)
         reset = {"status": QUEUED, "attempts": "0", "error": ""}
-        self._r.hset(self._job_key(job_id), mapping=reset)
-        self._r.lpush(self._queue_key, job_id)
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(self._dlq_key)
+                    if pipe.lpos(self._dlq_key, job_id) is None:
+                        pipe.reset()
+                        return False  # 不在 dlq
+                    pipe.multi()
+                    pipe.lrem(self._dlq_key, 1, job_id)
+                    pipe.hset(job_key, mapping=reset)
+                    pipe.lpush(self._queue_key, job_id)
+                    pipe.execute()
+                    break
+                except WatchError:
+                    continue
         self.update_queue_metrics()
         return True
 
