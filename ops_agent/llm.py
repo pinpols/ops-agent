@@ -58,7 +58,6 @@ def build_gateway_client() -> Any:
     providers = build_providers()
     if not providers:
         import anthropic
-
         from agent_ctl.providers.anthropic_provider import AnthropicProvider
 
         native = anthropic.Anthropic(max_retries=get_settings().anthropic_max_retries)

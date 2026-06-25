@@ -196,20 +196,35 @@ def serve(host: str = "0.0.0.0", port: int = 8080) -> None:  # noqa: S104 - 容�
     httpd = ThreadingHTTPServer((host, port), _Handler)
     # 鉴权 token 启动时快照一次:一致(密钥轮换不会让并发请求读到半新半旧)+ 避免每请求重读密钥文件。
     httpd.expected_token = settings.ops_webhook_token  # type: ignore[attr-defined]
-    # 异步模式:拉起 worker 池 + 队列,/diagnose 转入队 202(事件驱动 Step 1)。
-    job_queue = None
+    # 异步模式:/diagnose 转入队 + 202。后端二选一:
+    #   memory(默认,Step 1):进程内队列 + 内置 worker 池。
+    #   redis(Step 2):真队列(ingress 只入队/查询),worker 由独立进程 serve-worker 跑。
+    job_queue: Any = None
     if settings.ops_async_diagnose:
-        from ops_agent.jobqueue import JobQueue
+        if settings.ops_queue_backend == "redis":
+            from ops_agent.redisqueue import RedisQueue
 
-        job_queue = JobQueue(
-            diagnosis_job_handler,
-            workers=settings.ops_worker_count,
-            max_queue=settings.ops_queue_max,
-        )
+            if not settings.ops_redis_url:
+                raise ValueError("OPS_QUEUE_BACKEND=redis 需配 OPS_REDIS_URL")
+            job_queue = RedisQueue.from_url(
+                settings.ops_redis_url,
+                queue_key=settings.ops_queue_key,
+                dlq_key=settings.ops_dlq_key,
+                max_queue=settings.ops_queue_max,
+                job_ttl=settings.ops_job_ttl_seconds,
+                max_retries=settings.ops_max_retries,
+            )
+            logger.info("async 模式:redis 后端(worker 由 serve-worker 独立进程跑)")
+        else:
+            from ops_agent.jobqueue import JobQueue
+
+            job_queue = JobQueue(
+                diagnosis_job_handler,
+                workers=settings.ops_worker_count,
+                max_queue=settings.ops_queue_max,
+            )
+            logger.info("async 模式:memory 后端 workers=%d", settings.ops_worker_count)
         httpd.job_queue = job_queue  # type: ignore[attr-defined]
-        logger.info(
-            "async 模式:workers=%d queue_max=%d", settings.ops_worker_count, settings.ops_queue_max
-        )
     # SIGTERM(docker stop / k8s)默认直接终止、不跑 finally;转成 KeyboardInterrupt 走优雅退出。
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     logger.info("ops-agent serve on %s:%d (version=%s)", host, port, __version__)
@@ -219,7 +234,10 @@ def serve(host: str = "0.0.0.0", port: int = 8080) -> None:  # noqa: S104 - 容�
         logger.info("收到停止信号,优雅退出")
     finally:
         if job_queue is not None:
-            job_queue.shutdown()  # 排空在途任务
+            # memory 后端有内置 worker → shutdown 排空;redis 后端 ingress 只需 close 连接。
+            closer = getattr(job_queue, "shutdown", None) or getattr(job_queue, "close", None)
+            if closer is not None:
+                closer()
         httpd.shutdown()
         httpd.server_close()
 

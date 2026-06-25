@@ -57,5 +57,8 @@
 ## 5. 进度
 - [x] **Step 1**:进程内有界队列 + 异步 webhook(202+job_id)+ `GET /jobs/{id}` + 背压(429)+ 优雅停机
   + 可选回调 + 队列指标(jobs_submitted/succeeded/failed/rejected 进 `/metrics`)。默认关零回归。
-- [ ] Step 2:真队列(Redis/SQS)+ 独立 worker 进程(T2 规模才需要;`JobQueue` 接口已为换后端预留)
-- [ ] Step 3:trace_id 贯穿 ingress→queue→worker→回调 + DLQ/重试退避(队列计数已先落地)
+- [x] **Step 2**:**真 Redis 队列 + 独立 worker 进程 + DLQ/重试**。`OPS_QUEUE_BACKEND=redis` 时
+  `serve`(ingress 只入队/查询)与 `serve-worker`(独立进程消费,可起多份水平扩展)跨进程共享 Redis 状态,
+  worker 崩溃/重启可恢复;失败按 `OPS_MAX_RETRIES` 重试,超限进死信队列(`ops-agent dlq` 查看/重入)。
+  `redis` 为可选依赖,memory 后端不需要。真分布式 e2e 实测:ingress+worker 双进程、202、跨进程状态、重试→DLQ。
+- [ ] Step 3:trace_id 贯穿 ingress→queue→worker→回调 + 退避重试(指数)+ 队列深度告警(队列计数已先落地)

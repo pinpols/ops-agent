@@ -85,6 +85,13 @@ class Settings:
     ops_worker_count: int = 2
     ops_queue_max: int = 100
     ops_callback_url: str | None = None
+    # 事件驱动 Step 2:队列后端。memory=进程内(默认);redis=真队列 + 独立 worker 进程 + DLQ。
+    ops_queue_backend: str = "memory"
+    ops_redis_url: str | None = None
+    ops_queue_key: str = "ops:queue"
+    ops_dlq_key: str = "ops:dlq"
+    ops_job_ttl_seconds: int = 86_400
+    ops_max_retries: int = 2
 
     @property
     def langfuse_enabled(self) -> bool:
@@ -166,6 +173,12 @@ class Settings:
             ops_worker_count=int(os.environ.get("OPS_WORKER_COUNT", "2")),
             ops_queue_max=int(os.environ.get("OPS_QUEUE_MAX", "100")),
             ops_callback_url=os.environ.get("OPS_CALLBACK_URL"),
+            ops_queue_backend=os.environ.get("OPS_QUEUE_BACKEND", "memory").strip().lower(),
+            ops_redis_url=os.environ.get("OPS_REDIS_URL"),
+            ops_queue_key=os.environ.get("OPS_QUEUE_KEY", "ops:queue"),
+            ops_dlq_key=os.environ.get("OPS_DLQ_KEY", "ops:dlq"),
+            ops_job_ttl_seconds=int(os.environ.get("OPS_JOB_TTL_SECONDS", "86400")),
+            ops_max_retries=int(os.environ.get("OPS_MAX_RETRIES", "2")),
         )
 
 
