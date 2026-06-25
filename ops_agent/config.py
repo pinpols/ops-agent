@@ -92,6 +92,9 @@ class Settings:
     ops_dlq_key: str = "ops:dlq"
     ops_job_ttl_seconds: int = 86_400
     ops_max_retries: int = 2
+    ops_retry_base_seconds: float = 1.0
+    ops_retry_max_seconds: float = 60.0
+    ops_queue_depth_alert_threshold: int = 0
 
     @property
     def langfuse_enabled(self) -> bool:
@@ -179,6 +182,11 @@ class Settings:
             ops_dlq_key=os.environ.get("OPS_DLQ_KEY", "ops:dlq"),
             ops_job_ttl_seconds=int(os.environ.get("OPS_JOB_TTL_SECONDS", "86400")),
             ops_max_retries=int(os.environ.get("OPS_MAX_RETRIES", "2")),
+            ops_retry_base_seconds=float(os.environ.get("OPS_RETRY_BASE_SECONDS", "1")),
+            ops_retry_max_seconds=float(os.environ.get("OPS_RETRY_MAX_SECONDS", "60")),
+            ops_queue_depth_alert_threshold=int(
+                os.environ.get("OPS_QUEUE_DEPTH_ALERT_THRESHOLD", "0")
+            ),
         )
 
 

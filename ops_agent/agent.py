@@ -77,6 +77,7 @@ def run_agent(
     approver: Callable[[str, dict], bool] | None = None,
     include_trace: bool = False,
     budget: RunBudget | None = None,
+    trace_id: str | None = None,
 ) -> tuple[Diagnosis, list[dict]] | tuple[Diagnosis, list[dict], list[AgentStepTrace]]:
     """跑一轮多步诊断。返回 (结论, 更新后的 messages)。把 messages 传回即可多轮追问。
 
@@ -258,8 +259,9 @@ def run_agent(
                     steps=trace,
                     usage={"input_tokens": total_in, "output_tokens": total_out},
                     prompt_version=PROMPT_VERSION,
+                    trace_id=trace_id,
                 )
-            _record_history(settings, question, model, diagnosis, total_in, total_out)
+            _record_history(settings, question, model, diagnosis, total_in, total_out, trace_id)
             if include_trace:
                 return diagnosis, messages, trace
             return diagnosis, messages
@@ -282,6 +284,7 @@ def _record_history(
     diagnosis: Diagnosis,
     total_in: int,
     total_out: int,
+    trace_id: str | None,
 ) -> None:
     """配了 OPS_HISTORY_DB 就把本次诊断落历史库(可查询 + 留存);未配=no-op,零回归。
 
@@ -303,6 +306,7 @@ def _record_history(
                     question=question,
                     model=model,
                     prompt_version=PROMPT_VERSION,
+                    trace_id=trace_id,
                     input_tokens=total_in,
                     output_tokens=total_out,
                 )

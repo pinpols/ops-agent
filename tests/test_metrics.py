@@ -17,6 +17,13 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(snap[("diagnose_started_total", ())], 2.0)
         self.assertEqual(snap[("llm_input_tokens_total", ())], 120.0)
 
+    def test_set_renders_gauge(self):
+        m = Metrics()
+        m.set("queue_depth", 7, backend="memory")
+        text = m.render()
+        self.assertIn("# TYPE ops_agent_queue_depth gauge", text)
+        self.assertIn('ops_agent_queue_depth{backend="memory"} 7.0', text)
+
     def test_labels_are_distinct_series(self):
         m = Metrics()
         m.inc("tool_calls_total", tool="read_logs", ok="true")

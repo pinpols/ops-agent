@@ -21,12 +21,13 @@ class JobQueueTest(unittest.TestCase):
     def test_processes_job_to_succeeded(self):
         jq = JobQueue(lambda job: {"echo": job.question}, workers=1)
         try:
-            job = jq.submit("hello", target="fbs")
+            job = jq.submit("hello", target="fbs", trace_id="trace-1")
             self.assertIsNotNone(job)
             done = _wait(jq, job.id)
             self.assertEqual(done.status, SUCCEEDED)
             self.assertEqual(done.result, {"echo": "hello"})
             self.assertEqual(done.target, "fbs")
+            self.assertEqual(done.trace_id, "trace-1")
         finally:
             jq.shutdown()
 
@@ -77,9 +78,31 @@ class JobQueueTest(unittest.TestCase):
             done = _wait(jq, job.id)
             pub = done.to_public()
             self.assertEqual(pub["job_id"], job.id)
+            self.assertEqual(pub["trace_id"], job.trace_id)
             self.assertEqual(pub["status"], SUCCEEDED)
             self.assertEqual(pub["result"], {"ok": True})
             self.assertIn("created_at", pub)
+        finally:
+            jq.shutdown()
+
+    def test_retry_uses_backoff_then_succeeds(self):
+        seen = 0
+
+        def flaky(job):
+            nonlocal seen
+            seen += 1
+            if seen == 1:
+                raise RuntimeError("try again")
+            return {"ok": True}
+
+        jq = JobQueue(flaky, workers=1, max_retries=1, retry_base_seconds=0.01)
+        try:
+            job = jq.submit("q", trace_id="trace-retry")
+            done = _wait(jq, job.id)
+            self.assertEqual(done.status, SUCCEEDED)
+            self.assertEqual(done.attempts, 1)
+            self.assertEqual(done.result, {"ok": True})
+            self.assertEqual(done.trace_id, "trace-retry")
         finally:
             jq.shutdown()
 

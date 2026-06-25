@@ -25,6 +25,9 @@ def build_redis_queue(settings: Settings) -> RedisQueue:
         max_queue=settings.ops_queue_max,
         job_ttl=settings.ops_job_ttl_seconds,
         max_retries=settings.ops_max_retries,
+        retry_base_seconds=settings.ops_retry_base_seconds,
+        retry_max_seconds=settings.ops_retry_max_seconds,
+        queue_depth_alert_threshold=settings.ops_queue_depth_alert_threshold,
     )
 
 
@@ -38,12 +41,13 @@ def process_once(rq: RedisQueue, handler: Any, timeout: int = 1) -> str | None:
         return None
     rq.mark_running(job_id)
     try:
+        logger.info("处理 job_id=%s trace_id=%s", job_id, job.trace_id)
         result = handler(job)
         rq.complete(job_id, result)
         return "succeeded"
     except Exception as exc:  # noqa: BLE001 - worker 边界:失败转重试/DLQ,不崩线程
         outcome = rq.fail_or_retry(job_id, f"{type(exc).__name__}: {exc}")
-        logger.warning("job %s 失败 → %s: %s", job_id, outcome, exc)
+        logger.warning("job %s trace_id=%s 失败 → %s: %s", job_id, job.trace_id, outcome, exc)
         return outcome
 
 

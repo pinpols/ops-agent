@@ -33,6 +33,7 @@ FAILED = "failed"
 class DiagnosisJob:
     id: str
     question: str
+    trace_id: str
     target: str | None = None
     status: str = QUEUED
     result: dict | None = None
@@ -44,6 +45,7 @@ class DiagnosisJob:
         """对外 JSON(查询端点用)。"""
         return {
             "job_id": self.id,
+            "trace_id": self.trace_id,
             "status": self.status,
             "target": self.target,
             "created_at": self.created_at,
@@ -63,11 +65,20 @@ class JobQueue:
         workers: int = 2,
         max_queue: int = 100,
         max_results: int = 1000,
+        max_retries: int = 0,
+        retry_base_seconds: float = 1.0,
+        retry_max_seconds: float = 60.0,
+        queue_depth_alert_threshold: int = 0,
     ) -> None:
         self._handler = handler
-        self._q: queue.Queue[str] = queue.Queue(maxsize=max(1, max_queue))
+        self._max_queue = max(1, max_queue)
+        self._q: queue.Queue[str] = queue.Queue(maxsize=self._max_queue)
         self._jobs: OrderedDict[str, DiagnosisJob] = OrderedDict()
         self._max_results = max(1, max_results)
+        self._max_retries = max(0, max_retries)
+        self._retry_base_seconds = max(0.0, retry_base_seconds)
+        self._retry_max_seconds = max(0.0, retry_max_seconds)
+        self._queue_depth_alert_threshold = max(0, queue_depth_alert_threshold)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -76,9 +87,16 @@ class JobQueue:
             t.start()
             self._threads.append(t)
 
-    def submit(self, question: str, target: str | None = None) -> DiagnosisJob | None:
+    def submit(
+        self, question: str, target: str | None = None, trace_id: str | None = None
+    ) -> DiagnosisJob | None:
         """入队一个诊断任务。队列满 → 返回 None(背压,上游应回 429)。"""
-        job = DiagnosisJob(id=uuid.uuid4().hex, question=question, target=target)
+        job = DiagnosisJob(
+            id=uuid.uuid4().hex,
+            question=question,
+            target=target,
+            trace_id=trace_id or uuid.uuid4().hex,
+        )
         with self._lock:
             self._jobs[job.id] = job
             self._evict_locked()
@@ -88,8 +106,10 @@ class JobQueue:
             with self._lock:
                 self._jobs.pop(job.id, None)
             METRICS.inc("jobs_rejected_total")  # 背压:队列满拒收
+            self.update_queue_metrics()
             return None
         METRICS.inc("jobs_submitted_total")
+        self.update_queue_metrics()
         return job
 
     def get(self, job_id: str) -> DiagnosisJob | None:
@@ -98,6 +118,43 @@ class JobQueue:
 
     def qsize(self) -> int:
         return self._q.qsize()
+
+    def update_queue_metrics(self) -> None:
+        depth = self.qsize()
+        METRICS.set("queue_depth", depth, backend="memory")
+        if self._queue_depth_alert_threshold > 0:
+            METRICS.set("queue_depth_alert_threshold", self._queue_depth_alert_threshold)
+            METRICS.set(
+                "queue_depth_over_threshold",
+                1.0 if depth >= self._queue_depth_alert_threshold else 0.0,
+                backend="memory",
+            )
+
+    def _retry_delay(self, attempts: int) -> float:
+        if self._retry_base_seconds <= 0:
+            return 0.0
+        return min(self._retry_max_seconds, self._retry_base_seconds * (2 ** max(0, attempts - 1)))
+
+    def _requeue_after_delay(self, job_id: str, delay: float) -> None:
+        timer = threading.Timer(delay, self._requeue, args=(job_id,))
+        timer.daemon = True
+        timer.start()
+
+    def _requeue(self, job_id: str) -> None:
+        if self._stop.is_set():
+            return
+        try:
+            self._q.put_nowait(job_id)
+            self.update_queue_metrics()
+        except queue.Full:
+            logger.warning("重试入队失败:队列已满 job_id=%s", job_id)
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job is not None:
+                    job.status = FAILED
+                    job.error = "retry_queue_full"
+            METRICS.inc("jobs_failed_total")
+            self.update_queue_metrics()
 
     def _evict_locked(self) -> None:
         # 结果缓存上限:超出则从最旧开始淘汰(已 succeeded/failed 优先,但简化为 FIFO)。
@@ -121,6 +178,7 @@ class JobQueue:
                 if job is None:
                     continue
                 self._set_status(job_id, RUNNING)
+                self.update_queue_metrics()
                 try:
                     result = self._handler(job)
                     with self._lock:
@@ -129,14 +187,23 @@ class JobQueue:
                             self._jobs[job_id].status = SUCCEEDED
                     METRICS.inc("jobs_succeeded_total")
                 except Exception as exc:  # noqa: BLE001 - worker 边界:任务失败不拖垮 worker
-                    logger.exception("诊断任务失败 job_id=%s", job_id)
+                    logger.exception("诊断任务失败 job_id=%s trace_id=%s", job_id, job.trace_id)
                     with self._lock:
                         if job_id in self._jobs:
-                            self._jobs[job_id].error = f"{type(exc).__name__}: {exc}"
-                            self._jobs[job_id].status = FAILED
-                    METRICS.inc("jobs_failed_total")
+                            stored = self._jobs[job_id]
+                            stored.attempts += 1
+                            stored.error = f"{type(exc).__name__}: {exc}"
+                            if stored.attempts <= self._max_retries:
+                                stored.status = QUEUED
+                                delay = self._retry_delay(stored.attempts)
+                                METRICS.inc("jobs_retried_total")
+                                self._requeue_after_delay(job_id, delay)
+                            else:
+                                stored.status = FAILED
+                                METRICS.inc("jobs_failed_total")
             finally:
                 self._q.task_done()
+                self.update_queue_metrics()
 
     def shutdown(self, timeout: float = 10.0) -> None:
         """置停并 join worker(排空在途)。"""

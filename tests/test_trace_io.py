@@ -48,6 +48,28 @@ class TraceIoTest(unittest.TestCase):
         self.assertNotIn("a@example.com", content)
         self.assertNotIn("13900000000", content)
 
+    def test_trace_id_is_persisted(self):
+        diagnosis = Diagnosis(
+            severity=Severity.INFO,
+            summary="ok",
+            root_cause="无",
+            evidence=[],
+            suggested_action="无",
+            confidence=0.9,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_agent_trace(
+                Path(tmp),
+                question="q",
+                model="m",
+                diagnosis=diagnosis,
+                steps=[],
+                trace_id="trace-file",
+            )
+            content = path.read_text(encoding="utf-8")
+
+        self.assertIn('"trace_id": "trace-file"', content)
+
 
 if __name__ == "__main__":
     unittest.main()

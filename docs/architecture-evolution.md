@@ -46,8 +46,9 @@
 - 至此达成完整事件驱动、可独立扩缩、跨实例可恢复。
 
 ### Step 3 —— 可观测与韧性收口(可并入既有可观测线)
-- trace_id 贯穿 ingress→queue→worker→回调;队列深度/worker 利用率/处理时延进 `/metrics`。
-- 死信队列(DLQ)+ 重试退避;worker 优雅停机时排空在途。
+- trace_id 贯穿 ingress→queue→worker→回调,并写入 agent trace / history,可关联任务、日志、历史记录。
+- 队列深度进 `/metrics`:`queue_depth`、`queue_depth_alert_threshold`、`queue_depth_over_threshold`。
+- 死信队列(DLQ)+ 指数退避重试;worker 优雅停机时排空在途。
 
 ## 4. 不变量(演进中必须守住)
 - 推理核 `run_agent` 接口与行为不变;只是被 worker 调用而非被 HTTP handler 直接调用。
@@ -61,4 +62,6 @@
   `serve`(ingress 只入队/查询)与 `serve-worker`(独立进程消费,可起多份水平扩展)跨进程共享 Redis 状态,
   worker 崩溃/重启可恢复;失败按 `OPS_MAX_RETRIES` 重试,超限进死信队列(`ops-agent dlq` 查看/重入)。
   `redis` 为可选依赖,memory 后端不需要。真分布式 e2e 实测:ingress+worker 双进程、202、跨进程状态、重试→DLQ。
-- [ ] Step 3:trace_id 贯穿 ingress→queue→worker→回调 + 退避重试(指数)+ 队列深度告警(队列计数已先落地)
+- [x] **Step 3**:trace_id 贯穿 ingress→queue→worker→回调 + agent trace/history;Redis delayed retry
+  使用指数退避(`OPS_RETRY_BASE_SECONDS`/`OPS_RETRY_MAX_SECONDS`);memory/redis 均输出队列深度告警指标
+  (`OPS_QUEUE_DEPTH_ALERT_THRESHOLD`)。

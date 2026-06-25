@@ -18,11 +18,19 @@ class Metrics:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._counters: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
+        self._types: dict[str, str] = {}
 
     def inc(self, name: str, value: float = 1.0, **labels: str) -> None:
         key = (name, tuple(sorted(labels.items())))
         with self._lock:
+            self._types.setdefault(name, "counter")
             self._counters[key] = self._counters.get(key, 0.0) + value
+
+    def set(self, name: str, value: float, **labels: str) -> None:
+        key = (name, tuple(sorted(labels.items())))
+        with self._lock:
+            self._types[name] = "gauge"
+            self._counters[key] = float(value)
 
     def snapshot(self) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
         with self._lock:
@@ -35,7 +43,7 @@ class Metrics:
         for (name, labels), val in sorted(self.snapshot().items()):
             metric = f"{_PREFIX}_{name}"
             if metric not in seen:
-                lines.append(f"# TYPE {metric} counter")
+                lines.append(f"# TYPE {metric} {self._types.get(name, 'counter')}")
                 seen.add(metric)
             label_str = "{" + ",".join(f'{k}="{v}"' for k, v in labels) + "}" if labels else ""
             lines.append(f"{metric}{label_str} {val}")

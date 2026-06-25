@@ -29,6 +29,7 @@ def write_agent_trace(
     steps: list[Any],
     usage: dict[str, int] | None = None,
     prompt_version: str | None = None,
+    trace_id: str | None = None,
 ) -> Path:
     trace_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
@@ -38,13 +39,14 @@ def write_agent_trace(
             "type": "run",
             "timestamp": ts,
             "question": question,
+            "trace_id": trace_id,
             "model": model,
             # prompt 版本随 run 落痕:回归对比时能定位"是哪版 prompt 改变了结果"。
             "prompt_version": prompt_version,
             "usage": usage or {"input_tokens": 0, "output_tokens": 0},
         },
         *({"type": "tool_step", **_jsonable(step)} for step in steps),
-        {"type": "diagnosis", "diagnosis": _jsonable(diagnosis)},
+        {"type": "diagnosis", "trace_id": trace_id, "diagnosis": _jsonable(diagnosis)},
     ]
     if get_settings().ops_redact_artifacts:
         records = redact(records)

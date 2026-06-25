@@ -1,11 +1,13 @@
 """HTTP 触发层单测:Bearer 鉴权(fail-closed)+ /diagnose 业务(只读、降级)。"""
 
 import json
+import os
 import threading
 import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from ops_agent import server
@@ -47,15 +49,17 @@ class HandleDiagnoseTest(unittest.TestCase):
     def test_success_returns_diagnosis_and_is_read_only(self):
         captured = {}
 
-        def fake_run(q, approver=None):
+        def fake_run(q, approver=None, trace_id=None):
             captured["q"] = q
             captured["approver"] = approver
+            captured["trace_id"] = trace_id
             return _fake_diagnosis(), []
 
         with patch("ops_agent.agent.run_agent", side_effect=fake_run):
             status, body = server.handle_diagnose({"question": "为什么慢", "target": "fbs"})
         self.assertEqual(status, 200)
         self.assertEqual(body["diagnosis"]["severity"], "WARNING")
+        self.assertEqual(body["trace_id"], captured["trace_id"])
         self.assertIn("[target=fbs]", captured["q"])
         # 只读保证:注入的审批闸对任何危险工具都返回 False
         self.assertIs(captured["approver"], server._deny_all_approver)
@@ -129,7 +133,10 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
         from ops_agent.jobqueue import JobQueue
 
         # 假 handler:不打 LLM,直接回结果(验证 HTTP 异步管道:202 + 入队 + 查询)
-        self.jq = JobQueue(lambda job: {"diagnosis": {"severity": job.question}}, workers=1)
+        self.jq = JobQueue(
+            lambda job: {"trace_id": job.trace_id, "diagnosis": {"severity": job.question}},
+            workers=1,
+        )
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server._Handler)
         self.httpd.expected_token = "tok"
         self.httpd.job_queue = self.jq
@@ -145,13 +152,15 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
     def test_async_returns_202_then_pollable_to_succeeded(self):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/diagnose",
-            data=b'{"question":"WARNING","target":"fbs"}',
+            data=b'{"question":"WARNING","target":"fbs","trace_id":"trace-http"}',
             method="POST",
             headers={"Authorization": "Bearer tok"},
         )
         resp = urllib.request.urlopen(req, timeout=5)
         self.assertEqual(resp.status, 202)
-        job_id = json.loads(resp.read())["job_id"]
+        submitted = json.loads(resp.read())
+        job_id = submitted["job_id"]
+        self.assertEqual(submitted["trace_id"], "trace-http")
 
         # 轮询 /jobs/{id} 直到 succeeded
         import time
@@ -167,12 +176,47 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
                 break
             time.sleep(0.02)
         self.assertEqual(final["status"], "succeeded")
+        self.assertEqual(final["trace_id"], "trace-http")
+        self.assertEqual(final["result"]["trace_id"], "trace-http")
         self.assertEqual(final["result"]["diagnosis"]["severity"], "WARNING")
 
     def test_unknown_job_404(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(f"http://127.0.0.1:{self.port}/jobs/nope", timeout=5)
         self.assertEqual(ctx.exception.code, 404)
+
+    def test_callback_includes_trace_id(self):
+        received = []
+
+        class CallbackHandler(server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                received.append(json.loads(self.rfile.read(length)))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                return
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), CallbackHandler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.dict(
+                os.environ,
+                {"OPS_CALLBACK_URL": f"http://127.0.0.1:{port}/cb"},
+                clear=False,
+            ):
+                server._post_callback(
+                    SimpleNamespace(id="job-1", trace_id="trace-callback"),
+                    {"trace_id": "trace-callback", "diagnosis": {"severity": "INFO"}},
+                )
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertEqual(received[0]["trace_id"], "trace-callback")
+        self.assertEqual(received[0]["result"]["trace_id"], "trace-callback")
 
 
 if __name__ == "__main__":

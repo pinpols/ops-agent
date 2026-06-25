@@ -17,11 +17,12 @@ def _rq(max_queue: int = 100, max_retries: int = 2) -> RedisQueue:
 class RedisQueueTest(unittest.TestCase):
     def test_submit_stores_and_enqueues(self):
         rq = _rq()
-        job = rq.submit("why slow", target="fbs")
+        job = rq.submit("why slow", target="fbs", trace_id="trace-redis")
         self.assertIsNotNone(job)
         self.assertEqual(rq.qsize(), 1)
         loaded = rq.get(job.id)
         self.assertEqual(loaded.question, "why slow")
+        self.assertEqual(loaded.trace_id, "trace-redis")
         self.assertEqual(loaded.target, "fbs")
         self.assertEqual(loaded.status, QUEUED)
 
@@ -46,9 +47,12 @@ class RedisQueueTest(unittest.TestCase):
         rq = _rq(max_retries=1)
         job = rq.submit("q")
         rq.consume(timeout=1)
-        # 第 1 次失败:attempts=1 ≤ 1 → 重新入队
+        # 第 1 次失败:attempts=1 ≤ 1 → 进入 delayed retry zset,未到期不进主队列
         self.assertEqual(rq.fail_or_retry(job.id, "boom"), "retried")
         self.assertEqual(rq.get(job.id).status, QUEUED)
+        self.assertEqual(rq.retry_size(), 1)
+        self.assertEqual(rq.qsize(), 0)
+        self.assertEqual(rq.promote_due_retries(now=10**12), 1)
         self.assertEqual(rq.qsize(), 1)
         rq.consume(timeout=1)
         # 第 2 次失败:attempts=2 > 1 → 死信

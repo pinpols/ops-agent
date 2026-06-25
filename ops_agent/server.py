@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 import signal
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -45,27 +46,33 @@ def authorize(auth_header: str | None, expected_token: str | None) -> bool:
     return hmac.compare_digest(presented, expected_token)
 
 
+def _payload_trace_id(payload: dict[str, Any]) -> str:
+    value = payload.get("trace_id")
+    return value.strip() if isinstance(value, str) and value.strip() else uuid.uuid4().hex
+
+
 def handle_diagnose(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     """处理 /diagnose 业务(鉴权之后调用)。返回 (http_status, json_body)。只读、注入全拒审批闸。"""
     question = payload.get("question")
     if not isinstance(question, str) or not question.strip():
         return 400, {"error": "缺 question(非空字符串)"}
     target = payload.get("target")
+    trace_id = _payload_trace_id(payload)
     # 延迟 import:避免 server 模块 import 期就拉起 LLM 依赖链(健康探针应轻)。
     from ops_agent.agent import run_agent
 
     q = f"[target={target}] {question}" if target else question
     try:
         # include_trace 默认 False → 返回 2-元组;取 [0] 兼容两种返回签名(避免 mypy 解包歧义)。
-        diagnosis = run_agent(q, approver=_deny_all_approver)[0]
+        diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=trace_id)[0]
     except BudgetExceeded as e:
         return 503, {"error": "budget_exceeded", "detail": str(e)}
     except Exception:  # noqa: BLE001 - webhook 边界,任何异常转 500 而非崩进程
         METRICS.inc("webhook_error_total")
         # 完整异常(可能含路径/DSN 等内部细节)只进服务端日志;响应仅给类别,不回泄内部信息。
-        logger.exception("diagnose 失败")
-        return 500, {"error": "internal_error"}
-    return 200, {"diagnosis": diagnosis.model_dump(mode="json")}
+        logger.exception("diagnose 失败 trace_id=%s", trace_id)
+        return 500, {"error": "internal_error", "trace_id": trace_id}
+    return 200, {"trace_id": trace_id, "diagnosis": diagnosis.model_dump(mode="json")}
 
 
 def diagnosis_job_handler(job: Any) -> dict[str, Any]:
@@ -76,8 +83,9 @@ def diagnosis_job_handler(job: Any) -> dict[str, Any]:
     from ops_agent.agent import run_agent
 
     q = f"[target={job.target}] {job.question}" if job.target else job.question
-    diagnosis = run_agent(q, approver=_deny_all_approver)[0]
-    result = {"diagnosis": diagnosis.model_dump(mode="json")}
+    logger.info("开始处理诊断任务 job_id=%s trace_id=%s", job.id, job.trace_id)
+    diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
+    result = {"trace_id": job.trace_id, "diagnosis": diagnosis.model_dump(mode="json")}
     _post_callback(job, result)
     return result
 
@@ -89,14 +97,18 @@ def _post_callback(job: Any, result: dict[str, Any]) -> None:
         return
     import urllib.request
 
-    body = json.dumps({"job_id": job.id, "status": "succeeded", "result": result}).encode("utf-8")
+    body = json.dumps(
+        {"job_id": job.id, "trace_id": job.trace_id, "status": "succeeded", "result": result}
+    ).encode("utf-8")
     req = urllib.request.Request(  # noqa: S310
         url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
     try:
         urllib.request.urlopen(req, timeout=10).close()  # noqa: S310
     except Exception as exc:  # noqa: BLE001 - 回调是 best-effort,失败不该影响诊断结果
-        logger.warning("回调投递失败 job_id=%s url=%s: %s", job.id, url, exc)
+        logger.warning(
+            "回调投递失败 job_id=%s trace_id=%s url=%s: %s", job.id, job.trace_id, url, exc
+        )
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -123,6 +135,10 @@ class _Handler(BaseHTTPRequestHandler):
                 200, {"status": "ok", "version": __version__, "prompt_version": PROMPT_VERSION}
             )
         elif self.path == "/metrics":
+            jq = getattr(self.server, "job_queue", None)
+            updater = getattr(jq, "update_queue_metrics", None) if jq is not None else None
+            if updater is not None:
+                updater()
             self._send(200, text=METRICS.render())
         elif self.path.startswith("/jobs/"):
             self._handle_job_status(self.path[len("/jobs/") :])
@@ -177,12 +193,13 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(question, str) or not question.strip():
                 self._send(400, {"error": "缺 question(非空字符串)"})
                 return
-            job = jq.submit(question, payload.get("target"))
+            trace_id = _payload_trace_id(payload)
+            job = jq.submit(question, payload.get("target"), trace_id=trace_id)
             if job is None:
                 METRICS.inc("webhook_queue_full_total")
-                self._send(429, {"error": "queue_full", "detail": "稍后重试"})
+                self._send(429, {"error": "queue_full", "detail": "稍后重试", "trace_id": trace_id})
                 return
-            self._send(202, {"job_id": job.id, "status": job.status})
+            self._send(202, {"job_id": job.id, "trace_id": job.trace_id, "status": job.status})
             return
         # 同步模式(默认):内联跑完返回(向后兼容)。
         status, body = handle_diagnose(payload)
@@ -213,6 +230,9 @@ def serve(host: str = "0.0.0.0", port: int = 8080) -> None:  # noqa: S104 - 容�
                 max_queue=settings.ops_queue_max,
                 job_ttl=settings.ops_job_ttl_seconds,
                 max_retries=settings.ops_max_retries,
+                retry_base_seconds=settings.ops_retry_base_seconds,
+                retry_max_seconds=settings.ops_retry_max_seconds,
+                queue_depth_alert_threshold=settings.ops_queue_depth_alert_threshold,
             )
             logger.info("async 模式:redis 后端(worker 由 serve-worker 独立进程跑)")
         else:
@@ -222,6 +242,10 @@ def serve(host: str = "0.0.0.0", port: int = 8080) -> None:  # noqa: S104 - 容�
                 diagnosis_job_handler,
                 workers=settings.ops_worker_count,
                 max_queue=settings.ops_queue_max,
+                max_retries=settings.ops_max_retries,
+                retry_base_seconds=settings.ops_retry_base_seconds,
+                retry_max_seconds=settings.ops_retry_max_seconds,
+                queue_depth_alert_threshold=settings.ops_queue_depth_alert_threshold,
             )
             logger.info("async 模式:memory 后端 workers=%d", settings.ops_worker_count)
         httpd.job_queue = job_queue  # type: ignore[attr-defined]
