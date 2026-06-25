@@ -102,6 +102,13 @@ class RunTest(unittest.TestCase):
 class MainTest(unittest.TestCase):
     """main() CLI 编排:--save 落盘 + --baseline 回归对比。run() 整段 mock,不打 LLM。"""
 
+    def setUp(self):
+        # main() 内 load_dotenv() 会把 .env(可能含 OPS_USE_GATEWAY=true)写进进程 env,
+        # 污染同进程后续测试。CLI 边界加载本身没错,测试里 no-op 掉以隔离。
+        patcher = patch("evals.run_eval.load_dotenv")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     _STUB_RESULTS = {
         "a": {
             "passed": True,
