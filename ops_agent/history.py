@@ -136,8 +136,10 @@ class DiagnosisStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(max(1, limit))
         with self._lock:
+            # nosec B608: {where} 只由固定列名拼接,所有用户值都走 ? 参数绑定(params),非注入
             rows = self._conn.execute(
-                f"SELECT * FROM diagnosis_run{where} ORDER BY id DESC LIMIT ?", params
+                f"SELECT * FROM diagnosis_run{where} ORDER BY id DESC LIMIT ?",  # nosec B608
+                params,
             ).fetchall()
         return [dict(r) for r in rows]
 

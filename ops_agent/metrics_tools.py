@@ -33,9 +33,9 @@ def query_metrics_result(promql: str, target: str | None = None) -> ToolResult:
     if not base.startswith(("http://", "https://")):
         return ToolResult.failure("[query_metrics] metrics_url 必须是 http(s)")
     url = base.rstrip("/") + _QUERY_PATH + "?" + urllib.parse.urlencode({"query": promql})
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})  # noqa: S310 - 已校验 http(s)
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})  # noqa: S310
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:  # noqa: S310 - 已校验 scheme
+        with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:  # noqa: S310  # nosec B310
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError) as e:
         return ToolResult.failure(f"[query_metrics] 请求失败:{e}")
