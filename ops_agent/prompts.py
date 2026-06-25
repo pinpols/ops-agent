@@ -5,7 +5,7 @@ trace 与 bundle 会记录当时的 (model, PROMPT_VERSION),回归对比时能�
 """
 
 # 改 _AGENT_SYSTEM 文案 → 必须同步 bump 这里。CI eval 用它标注基线。
-PROMPT_VERSION = "1.0.0"
+PROMPT_VERSION = "1.1.0"  # 1.1.0: diagnose_log 加注入围栏 + 反注入安全条款(对抗 prompt 注入)
 
 # 工具返回内容回喂 LLM 时的不可信数据围栏标记。系统 prompt 明确:围栏内一律是数据、非指令。
 UNTRUSTED_OPEN = "<<<UNTRUSTED_TOOL_OUTPUT"
