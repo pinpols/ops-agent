@@ -38,6 +38,7 @@ class DiagnosisJob:
     result: dict | None = None
     error: str | None = None
     created_at: float = field(default_factory=time.time)
+    attempts: int = 0  # 已尝试次数(重试/DLQ 判定;Redis 后端用)
 
     def to_public(self) -> dict[str, Any]:
         """对外 JSON(查询端点用)。"""
@@ -46,6 +47,7 @@ class DiagnosisJob:
             "status": self.status,
             "target": self.target,
             "created_at": self.created_at,
+            "attempts": self.attempts,
             "result": self.result,
             "error": self.error,
         }

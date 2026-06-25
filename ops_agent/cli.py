@@ -209,6 +209,45 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     serve(host=args.host, port=args.port)
 
 
+def _cmd_serve_worker(args: argparse.Namespace) -> None:
+    from ops_agent.worker_main import run
+
+    load_dotenv()
+    _require_api_key()
+    run()
+
+
+def _redis_queue_or_exit():
+    from ops_agent.redisqueue import RedisQueue
+
+    load_dotenv()
+    s = get_settings()
+    if s.ops_queue_backend != "redis" or not s.ops_redis_url:
+        print("DLQ 仅 redis 后端可用(OPS_QUEUE_BACKEND=redis + OPS_REDIS_URL)", file=sys.stderr)
+        raise SystemExit(2)
+    return RedisQueue.from_url(
+        s.ops_redis_url,
+        queue_key=s.ops_queue_key,
+        dlq_key=s.ops_dlq_key,
+        max_retries=s.ops_max_retries,
+    )
+
+
+def _cmd_dlq(args: argparse.Namespace) -> None:
+    rq = _redis_queue_or_exit()
+    try:
+        if args.requeue:
+            ok = rq.dlq_requeue(args.requeue)
+            print("已重新入队" if ok else "DLQ 中无此 job")
+            return
+        ids = rq.dlq_list()
+        print(f"DLQ 共 {rq.dlq_size()} 条:")
+        for jid in ids:
+            print(" ", jid)
+    finally:
+        rq.close()
+
+
 def _cmd_doctor(args: argparse.Namespace) -> None:
     from ops_agent.redaction import RedactionRulesError, validate_redaction_rules
 
@@ -359,6 +398,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="0.0.0.0", help="监听地址(默认 0.0.0.0)")  # noqa: S104
     serve.add_argument("--port", type=int, default=8080, help="监听端口(默认 8080)")
     serve.set_defaults(func=_cmd_serve)
+
+    worker = sub.add_parser("serve-worker", help="独立 worker 进程(Step 2,消费 Redis 队列)")
+    worker.set_defaults(func=_cmd_serve_worker)
+
+    dlq = sub.add_parser("dlq", help="查看/重入死信队列(需 redis 后端)")
+    dlq.add_argument("--requeue", metavar="JOB_ID", help="把某死信 job 移回主队列")
+    dlq.set_defaults(func=_cmd_dlq)
 
     history = sub.add_parser("history", help="查询/导出诊断历史(需 OPS_HISTORY_DB)")
     history.add_argument("--target", help="按目标系统过滤")

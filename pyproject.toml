@@ -26,11 +26,15 @@ graph = [
 observability = [
     "langfuse>=3.0",
 ]
+redis = [
+    "redis>=5",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "mypy>=1.11",
     "ruff>=0.8",
+    "fakeredis>=2.20",
 ]
 
 [project.scripts]
