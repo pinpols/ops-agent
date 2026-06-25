@@ -138,6 +138,13 @@ class RedisQueue:
     def get(self, job_id: str) -> DiagnosisJob | None:
         return self._load(job_id)
 
+    def ping(self) -> bool:
+        """后端连通性探测(k8s readiness 用):Redis 可达返回 True。"""
+        try:
+            return bool(self._r.ping())
+        except Exception:  # noqa: BLE001 - 探活边界:任何连接异常都视为未就绪
+            return False
+
     def qsize(self) -> int:
         return int(self._r.llen(self._queue_key))
 

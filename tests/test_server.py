@@ -104,6 +104,20 @@ class HttpEndToEndTest(unittest.TestCase):
         status, body = self._get("/metrics")
         self.assertEqual(status, 200)
 
+    def test_readyz_ok_without_backend(self):
+        # 无队列后端(同步模式)→ readiness 直接 ready
+        status, body = self._get("/readyz")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "ready")
+
+    def test_readyz_503_when_backend_unreachable(self):
+        # 注入一个 ping()=False 的假队列 → readiness 503(摘出 Service),但 liveness 仍 200
+        self.httpd.job_queue = SimpleNamespace(ping=lambda: False)
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._get("/readyz")
+        self.assertEqual(ctx.exception.code, 503)
+        self.assertEqual(self._get("/healthz")[0], 200)  # liveness 不受后端影响
+
     def _post(self, body: bytes, token: str | None = None):
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         req = urllib.request.Request(

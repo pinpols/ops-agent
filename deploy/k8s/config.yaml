@@ -1,0 +1,45 @@
+# 非机密配置(ConfigMap)+ 机密占位(Secret 示例)。
+# 真部署:把 secret.example 的值换成真值并改名,或用外部 secret 管理(SOPS / External Secrets / Vault)。
+# 切勿把真 token / DSN / API key 提交进仓库。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ops-agent-config
+  labels:
+    app: ops-agent
+data:
+  OPS_PROFILE: "prod"
+  OPS_ASYNC_DIAGNOSE: "true"          # 异步:webhook 入队 + 202,worker 独立消费
+  OPS_QUEUE_BACKEND: "redis"          # Step 2 分布式后端
+  OPS_QUEUE_KEY: "ops:queue"
+  OPS_DLQ_KEY: "ops:dlq"
+  OPS_QUEUE_MAX: "500"                # 背压上限(超出 ingress 回 429)
+  OPS_WORKER_COUNT: "4"               # 单 worker 进程内消费线程数
+  OPS_MAX_RETRIES: "2"
+  OPS_RETRY_BASE_SECONDS: "1"
+  OPS_RETRY_MAX_SECONDS: "60"
+  OPS_JOB_TTL_SECONDS: "86400"
+  OPS_QUEUE_DEPTH_ALERT_THRESHOLD: "200"
+  OPS_METRICS_FILE: "/var/run/ops-agent/metrics.prom"
+  OPS_WORKER_HEARTBEAT_FILE: "/var/run/ops-agent/worker.hb"
+  # 目标系统(只读诊断对象)路径按实际挂载调整
+  # OPS_TARGET_ROOT: "/target"
+  # OPS_LOG_DIR: "/target/logs"
+---
+# ⚠️ 示例 Secret —— 仅占位,值是假的。真部署请替换并改用外部 secret 管理。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ops-agent-secrets
+  labels:
+    app: ops-agent
+type: Opaque
+stringData:
+  # ingress webhook 鉴权 token(未配则 fail-closed,所有 /diagnose /jobs 401)
+  OPS_WEBHOOK_TOKEN: "REPLACE_ME_webhook_token"
+  # 队列后端
+  OPS_REDIS_URL: "redis://ops-agent-redis:6379/0"
+  # LLM(或走 gateway:设 OPS_USE_GATEWAY=true 并改指 gateway 地址)
+  ANTHROPIC_API_KEY: "REPLACE_ME_anthropic_key"
+  # 只读 DB 取证(最小权限只读用户;prod 拒绝 postgres/root/admin)
+  OPS_PG_DSN: "postgresql://readonly:REPLACE_ME@db:5432/app"

@@ -1,12 +1,14 @@
 """Redis 队列后端单测(用 fakeredis,无需真 Redis):入队/查询/背压/重试/DLQ + worker 处理。"""
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import fakeredis
 
 from ops_agent.jobqueue import FAILED, QUEUED, RUNNING, SUCCEEDED
 from ops_agent.redisqueue import RedisQueue
-from ops_agent.worker_main import process_once
+from ops_agent.worker_main import _touch_heartbeat, process_once
 
 
 def _rq(max_queue: int = 100, max_retries: int = 2) -> RedisQueue:
@@ -78,6 +80,18 @@ class RedisQueueTest(unittest.TestCase):
         rq = _rq()
         self.assertIsNone(rq.consume(timeout=1))
 
+    def test_ping_true_on_live_backend_false_on_error(self):
+        rq = _rq()
+        self.assertTrue(rq.ping())  # fakeredis 活着
+        rq._r.close()
+
+        class _Dead:
+            def ping(self):
+                raise ConnectionError("down")
+
+        rq._r = _Dead()
+        self.assertFalse(rq.ping())  # 连接异常视为未就绪
+
     def test_update_queue_metrics_emits_backlog_and_dlq_gauges(self):
         from ops_agent.metrics import METRICS
 
@@ -126,6 +140,13 @@ class WorkerProcessOnceTest(unittest.TestCase):
     def test_process_once_empty_returns_none(self):
         rq = _rq()
         self.assertIsNone(process_once(rq, lambda j: {}, timeout=1))
+
+    def test_touch_heartbeat_creates_file_and_tolerates_none(self):
+        _touch_heartbeat(None)  # 未配 → no-op,不报错
+        with tempfile.TemporaryDirectory() as tmp:
+            hb = Path(tmp) / "sub" / "worker.hb"
+            _touch_heartbeat(hb)  # 自动建父目录 + 落文件
+            self.assertTrue(hb.exists())
 
     def test_lost_job_when_hash_missing_is_logged_and_counted(self):
         # 队列里有 id 但 hash 不在(TTL过期/驱逐)→ 不静默丢,计 jobs_lost_total

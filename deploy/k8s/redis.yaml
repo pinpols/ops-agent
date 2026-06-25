@@ -1,0 +1,99 @@
+# ⚠️ 起步级单实例 Redis(队列后端)——用于自托管/测试。
+# 生产建议改用托管 Redis 或 Sentinel/Cluster 做 HA(单实例宕则队列不可用 → ingress readiness 失败、
+# worker 停摆,见 docs/runbook/queue-operations.md §停摆)。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ops-agent-redis
+  labels:
+    app: ops-agent
+    component: redis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate            # 单实例 + PVC:不能两个 pod 同时挂同一卷
+  selector:
+    matchLabels:
+      app: ops-agent
+      component: redis
+  template:
+    metadata:
+      labels:
+        app: ops-agent
+        component: redis
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999          # redis 官方镜像的 redis 用户
+        fsGroup: 999
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args:
+            - "--appendonly"
+            - "yes"             # AOF 持久化:重启不丢在队/重试/死信
+            - "--maxmemory"
+            - "256mb"
+            - "--maxmemory-policy"
+            - "noeviction"      # 队列数据不可被 LRU 驱逐(驱逐=丢单)
+          ports:
+            - name: redis
+              containerPort: 6379
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "320Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ops-agent-redis
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ops-agent-redis
+  labels:
+    app: ops-agent
+    component: redis
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ops-agent-redis
+  labels:
+    app: ops-agent
+    component: redis
+spec:
+  selector:
+    app: ops-agent
+    component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
