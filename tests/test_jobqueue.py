@@ -1,0 +1,88 @@
+"""进程内任务队列单测:异步处理 / 失败标记 / 背压 / 查询。"""
+
+import threading
+import time
+import unittest
+
+from ops_agent.jobqueue import FAILED, SUCCEEDED, JobQueue
+
+
+def _wait(jq: JobQueue, job_id: str, timeout: float = 3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = jq.get(job_id)
+        if job is not None and job.status in (SUCCEEDED, FAILED):
+            return job
+        time.sleep(0.01)
+    return jq.get(job_id)
+
+
+class JobQueueTest(unittest.TestCase):
+    def test_processes_job_to_succeeded(self):
+        jq = JobQueue(lambda job: {"echo": job.question}, workers=1)
+        try:
+            job = jq.submit("hello", target="fbs")
+            self.assertIsNotNone(job)
+            done = _wait(jq, job.id)
+            self.assertEqual(done.status, SUCCEEDED)
+            self.assertEqual(done.result, {"echo": "hello"})
+            self.assertEqual(done.target, "fbs")
+        finally:
+            jq.shutdown()
+
+    def test_handler_exception_marks_failed(self):
+        def boom(job):
+            raise RuntimeError("nope")
+
+        jq = JobQueue(boom, workers=1)
+        try:
+            job = jq.submit("x")
+            done = _wait(jq, job.id)
+            self.assertEqual(done.status, FAILED)
+            self.assertIn("nope", done.error)
+        finally:
+            jq.shutdown()
+
+    def test_backpressure_returns_none_when_full(self):
+        # 阻塞 handler 占住唯一 worker;队列(max=1)塞满后 submit 返回 None
+        gate = threading.Event()
+
+        def slow(job):
+            gate.wait(5)
+            return {}
+
+        jq = JobQueue(slow, workers=1, max_queue=1)
+        try:
+            jq.submit("1")  # worker 取走开始跑(阻塞在 gate)
+            time.sleep(0.15)
+            j2 = jq.submit("2")  # 入队占满 max_queue=1
+            j3 = jq.submit("3")  # 队列满 → 背压 → None
+            self.assertIsNotNone(j2)
+            self.assertIsNone(j3)
+        finally:
+            gate.set()
+            jq.shutdown()
+
+    def test_get_unknown_returns_none(self):
+        jq = JobQueue(lambda job: {}, workers=1)
+        try:
+            self.assertIsNone(jq.get("does-not-exist"))
+        finally:
+            jq.shutdown()
+
+    def test_to_public_shape(self):
+        jq = JobQueue(lambda job: {"ok": True}, workers=1)
+        try:
+            job = jq.submit("q", target="t")
+            done = _wait(jq, job.id)
+            pub = done.to_public()
+            self.assertEqual(pub["job_id"], job.id)
+            self.assertEqual(pub["status"], SUCCEEDED)
+            self.assertEqual(pub["result"], {"ok": True})
+            self.assertIn("created_at", pub)
+        finally:
+            jq.shutdown()
+
+
+if __name__ == "__main__":
+    unittest.main()
