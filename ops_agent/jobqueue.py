@@ -176,6 +176,10 @@ class JobQueue:
             try:
                 job = self.get(job_id)
                 if job is None:
+                    # 出队但 job entry 已被结果缓存淘汰(max_results < max_queue 误配时)→ 任务丢失。
+                    # 静默 continue 会"无声丢单",留痕 + 计指标便于告警。
+                    logger.warning("job_id=%s 出队但 entry 已淘汰,丢弃", job_id)
+                    METRICS.inc("jobs_lost_total")
                     continue
                 self._set_status(job_id, RUNNING)
                 self.update_queue_metrics()

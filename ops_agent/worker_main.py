@@ -38,6 +38,12 @@ def process_once(rq: RedisQueue, handler: Any, timeout: int = 1) -> str | None:
         return None
     job = rq.get(job_id)
     if job is None:
+        # 取到了 job_id 但 hash 已不在(TTL 过期/被驱逐)→ 任务丢失。出队即静默跳过会"无声丢单",
+        # 必须留痕 + 计指标,便于告警/排查。
+        from ops_agent.metrics import METRICS
+
+        logger.warning("job_id=%s 出队但 hash 缺失(TTL过期/驱逐),丢弃", job_id)
+        METRICS.inc("jobs_lost_total")
         return None
     rq.mark_running(job_id)
     try:
