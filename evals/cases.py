@@ -65,7 +65,9 @@ CASES: list[Case] = [
             "o.s.jdbc.CannotGetJdbcConnectionException - Failed to obtain JDBC Connection"
         ),
         expected_severity=Severity.CRITICAL,
-        expected_keywords=["hikari", "connection", "timeout"],
+        # 关键词用 verbatim 标识符,不用 "timeout" 这类概念词:模型用中文作答,
+        # 概念词不会 substring 命中(教训:keyword=日志里的专名/类名/端口/编码)。
+        expected_keywords=["hikari", "connection"],
     ),
     Case(
         id="pg_lock_wait",
@@ -100,7 +102,7 @@ CASES: list[Case] = [
             "retrying payment export request attempt=3"
         ),
         expected_severity=Severity.WARNING,
-        expected_keywords=["payment", "timeout"],
+        expected_keywords=["payment"],  # verbatim 专名;弃概念词 "timeout"(中文作答不命中)
     ),
     Case(
         id="disk_full",
@@ -568,7 +570,7 @@ CASES: list[Case] = [
             "previous execution still running (started 61m ago)"
         ),
         expected_severity=Severity.WARNING,
-        expected_keywords=["already running", "nightly-reconcile"],
+        expected_keywords=["nightly-reconcile"],  # 弃概念词 "already running"(中文作答不命中)
     ),
     # ── 网络 / 安全 ──────────────────────────────────────────
     Case(
@@ -613,7 +615,7 @@ CASES: list[Case] = [
             "rejected 37 requests in last window"
         ),
         expected_severity=Severity.WARNING,
-        expected_keywords=["rate", "429"],
+        expected_keywords=["429"],  # 弃概念词 "rate"(中文作答说"限流/速率",不命中)
     ),
     Case(
         id="auth_invalid_token",

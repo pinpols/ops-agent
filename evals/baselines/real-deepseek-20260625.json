@@ -1,0 +1,421 @@
+{
+  "metadata": {
+    "generated_at": "2026-06-25T14:54:38.241613+00:00",
+    "git_sha": "b74f623",
+    "prompt_version": "1.0.0",
+    "model": "claude-sonnet-4-6",
+    "judge_model": null,
+    "judge_enabled": false,
+    "case_count": 58
+  },
+  "results": {
+    "redis_down": {
+      "passed": false,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "hikari_starvation": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "healthy_startup": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "db_pool_exhausted": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_lock_wait": {
+      "passed": false,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "worker_queue_backlog": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "external_api_timeout": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "disk_full": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "healthy_heartbeat": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "real_import_json_shape_mismatch": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "real_import_missing_table": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "real_partition_replace_copy_config": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "kafka_broker_down": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "kafka_consumer_lag": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "kafka_rebalance_storm": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "kafka_offset_commit_failed": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "kafka_rebalance_completed_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_deadlock_detected": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_too_many_connections": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_statement_timeout": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_serialization_failure": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_unique_violation": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_fk_violation": {
+      "passed": false,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "citus_worker_node_down": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_replication_lag": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_wal_disk_pressure": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "pg_vacuum_progress_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "redis_oom_maxmemory": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "redis_master_failover": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "s3_access_denied": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "s3_bucket_missing": {
+      "passed": false,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "s3_slowdown_throttle": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "jvm_heap_oom": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "jvm_gc_overhead": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "jvm_metaspace_oom": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "jvm_thread_deadlock": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "flyway_checksum_mismatch": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "flyway_migrate_success_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "spring_bean_creation_failure": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "spring_port_in_use": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "spring_context_started_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "job_stuck_running": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "task_retry_exhausted_dlq": {
+      "passed": false,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "dispatch_compensation_conflict": {
+      "passed": false,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "worker_graceful_shutdown_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "job_completed_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "quartz_misfire": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "quartz_job_already_running": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "dns_resolution_failure": {
+      "passed": true,
+      "severity": "CRITICAL",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "tls_handshake_failure": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "ssrf_blocked": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "webhook_rate_limited": {
+      "passed": false,
+      "severity": "WARNING",
+      "keyword_recall": 0.5,
+      "missed_keywords": [
+        "rate"
+      ],
+      "normal_ok": true
+    },
+    "auth_invalid_token": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "hikari_connection_leak": {
+      "passed": true,
+      "severity": "WARNING",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "scheduled_trigger_fired_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "healthy_gc_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "dryrun_dispatch_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    },
+    "backfill_completed_normal": {
+      "passed": true,
+      "severity": "INFO",
+      "keyword_recall": 1.0,
+      "missed_keywords": [],
+      "normal_ok": true
+    }
+  }
+}
