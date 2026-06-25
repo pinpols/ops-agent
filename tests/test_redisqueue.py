@@ -105,6 +105,17 @@ class WorkerProcessOnceTest(unittest.TestCase):
         rq = _rq()
         self.assertIsNone(process_once(rq, lambda j: {}, timeout=1))
 
+    def test_lost_job_when_hash_missing_is_logged_and_counted(self):
+        # 队列里有 id 但 hash 不在(TTL过期/驱逐)→ 不静默丢,计 jobs_lost_total
+        from ops_agent.metrics import METRICS
+
+        rq = _rq()
+        rq._r.lpush(rq._queue_key, "ghost-id")  # 只入队 id,不建 hash
+        before = METRICS.snapshot().get(("jobs_lost_total", ()), 0)
+        self.assertIsNone(process_once(rq, lambda j: {}, timeout=1))
+        after = METRICS.snapshot().get(("jobs_lost_total", ()), 0)
+        self.assertEqual(after, before + 1)
+
 
 if __name__ == "__main__":
     unittest.main()

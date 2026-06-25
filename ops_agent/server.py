@@ -84,21 +84,38 @@ def diagnosis_job_handler(job: Any) -> dict[str, Any]:
 
     q = f"[target={job.target}] {job.question}" if job.target else job.question
     logger.info("开始处理诊断任务 job_id=%s trace_id=%s", job.id, job.trace_id)
-    diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
+    try:
+        diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
+    except Exception as exc:
+        # 失败也回调:否则配了 OPS_CALLBACK_URL 的下游永远等不到结果、不知任务已失败/进 DLQ。
+        _post_callback(job, status="failed", error=f"{type(exc).__name__}: {exc}")
+        raise
     result = {"trace_id": job.trace_id, "diagnosis": diagnosis.model_dump(mode="json")}
-    _post_callback(job, result)
+    _post_callback(job, status="succeeded", result=result)
     return result
 
 
-def _post_callback(job: Any, result: dict[str, Any]) -> None:
-    """配了 OPS_CALLBACK_URL 就把结果 POST 过去(best-effort,失败只 warn,不影响任务成败)。"""
+def _post_callback(
+    job: Any,
+    *,
+    status: str,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    """配了 OPS_CALLBACK_URL 就把结果 POST 过去(成功/失败均回调,best-effort,失败只 warn)。"""
     url = get_settings().ops_callback_url
     if not url or not url.startswith(("http://", "https://")):
         return
     import urllib.request
 
     body = json.dumps(
-        {"job_id": job.id, "trace_id": job.trace_id, "status": "succeeded", "result": result}
+        {
+            "job_id": job.id,
+            "trace_id": job.trace_id,
+            "status": status,
+            "result": result,
+            "error": error,
+        }
     ).encode("utf-8")
     req = urllib.request.Request(  # noqa: S310
         url, data=body, headers={"Content-Type": "application/json"}, method="POST"

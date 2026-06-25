@@ -208,15 +208,22 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
                 {"OPS_CALLBACK_URL": f"http://127.0.0.1:{port}/cb"},
                 clear=False,
             ):
+                job = SimpleNamespace(id="job-1", trace_id="trace-callback")
                 server._post_callback(
-                    SimpleNamespace(id="job-1", trace_id="trace-callback"),
-                    {"trace_id": "trace-callback", "diagnosis": {"severity": "INFO"}},
+                    job,
+                    status="succeeded",
+                    result={"trace_id": "trace-callback", "diagnosis": {"severity": "INFO"}},
                 )
+                # 失败也要回调(回归:下游需知任务失败)
+                server._post_callback(job, status="failed", error="RuntimeError: boom")
         finally:
             httpd.shutdown()
             httpd.server_close()
         self.assertEqual(received[0]["trace_id"], "trace-callback")
+        self.assertEqual(received[0]["status"], "succeeded")
         self.assertEqual(received[0]["result"]["trace_id"], "trace-callback")
+        self.assertEqual(received[1]["status"], "failed")
+        self.assertEqual(received[1]["error"], "RuntimeError: boom")
 
 
 if __name__ == "__main__":
