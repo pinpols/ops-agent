@@ -1,0 +1,111 @@
+# worker(serve-worker):独立消费 Redis 队列 → 跑只读诊断 → 结果/重试/DLQ。
+# 无 Service(不收外部流量);崩溃/重启可恢复(状态在 Redis)。水平扩展安全(BRPOP 分发)。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ops-agent-worker
+  labels:
+    app: ops-agent
+    component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ops-agent
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: ops-agent
+        component: worker
+    spec:
+      # 滚动更新时给在途任务排空时间:worker 收 SIGTERM 后 stop+join(上限 ~10s)
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/pinpols/ops-agent:latest   # 与 ingress 同镜像,不同 args
+          args: ["serve-worker"]
+          envFrom:
+            - configMapRef:
+                name: ops-agent-config
+            - secretRef:
+                name: ops-agent-secrets
+          # liveness:心跳文件 mtime 新鲜度。主循环每秒 touch;>30s 未更新视为僵死 → 重启。
+          # 比"进程在不在"更强:能检出主循环卡死/死锁(容器仍 Running 但不工作)。
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import os, sys, time
+                  p = os.environ["OPS_WORKER_HEARTBEAT_FILE"]
+                  fresh = os.path.exists(p) and (time.time() - os.path.getmtime(p) < 30)
+                  sys.exit(0 if fresh else 1)
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "768Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: runtime
+              mountPath: /var/run/ops-agent
+            - name: state
+              mountPath: /app/.ops-agent
+      volumes:
+        - name: runtime
+          emptyDir: {}
+        - name: state
+          emptyDir: {}
+---
+# worker 扩容:CPU 是可移植的起步指标。
+# 更贴切的是按 queue_depth 扩(需 prometheus-adapter 把 ops_agent_queue_depth 暴露成
+# External/Object metric),示例见注释。
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ops-agent-worker
+  labels:
+    app: ops-agent
+    component: worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ops-agent-worker
+  minReplicas: 2
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+    # 按队列深度扩(取消注释,需 prometheus-adapter 已配 ops_agent_queue_depth):
+    # - type: External
+    #   external:
+    #     metric:
+    #       name: ops_agent_queue_depth
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "20"   # 每副本目标承担 20 待处理
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # 缩容慢一点,防抖

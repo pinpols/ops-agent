@@ -164,9 +164,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/healthz":
+            # liveness:进程能服务即存活。后端(Redis)抖动不该重启 pod,故不在此探后端。
             self._send(
                 200, {"status": "ok", "version": __version__, "prompt_version": PROMPT_VERSION}
             )
+        elif self.path == "/readyz":
+            self._handle_readyz()
         elif self.path == "/metrics":
             jq = getattr(self.server, "job_queue", None)
             updater = getattr(jq, "update_queue_metrics", None) if jq is not None else None
@@ -177,6 +180,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_job_status(self.path[len("/jobs/") :])
         else:
             self._send(404, {"error": "not_found"})
+
+    def _handle_readyz(self) -> None:
+        """readiness:能否接活。redis 后端探 Redis 可达;不可达→503 摘出 Service。
+
+        与 liveness 区分:后端 down 时 readiness 失败(暂不收流量),但 liveness 仍 OK
+        (不重启 pod),Redis 恢复后自动回到就绪。
+        """
+        jq = getattr(self.server, "job_queue", None)
+        ping = getattr(jq, "ping", None) if jq is not None else None
+        if ping is not None and not ping():
+            self._send(503, {"status": "not_ready", "reason": "queue_backend_unreachable"})
+            return
+        self._send(200, {"status": "ready"})
 
     def _handle_job_status(self, job_id: str) -> None:
         """异步任务状态查询 GET /jobs/{id}。需鉴权(否则诊断结果裸泄露);无队列→404。"""

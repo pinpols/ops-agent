@@ -95,6 +95,8 @@ class Settings:
     ops_retry_base_seconds: float = 1.0
     ops_retry_max_seconds: float = 60.0
     ops_queue_depth_alert_threshold: int = 0
+    # worker 心跳文件:run 循环每秒 touch;k8s liveness exec 探针据 mtime 判存活(检出僵死)。
+    ops_worker_heartbeat_file: Path | None = None
 
     @property
     def langfuse_enabled(self) -> bool:
@@ -188,6 +190,11 @@ class Settings:
             ops_max_retries=int(os.environ.get("OPS_MAX_RETRIES", "2")),
             ops_retry_base_seconds=float(os.environ.get("OPS_RETRY_BASE_SECONDS", "1")),
             ops_retry_max_seconds=float(os.environ.get("OPS_RETRY_MAX_SECONDS", "60")),
+            ops_worker_heartbeat_file=(
+                Path(os.environ["OPS_WORKER_HEARTBEAT_FILE"]).resolve()
+                if os.environ.get("OPS_WORKER_HEARTBEAT_FILE")
+                else None
+            ),
             ops_queue_depth_alert_threshold=int(
                 os.environ.get("OPS_QUEUE_DEPTH_ALERT_THRESHOLD", "0")
             ),

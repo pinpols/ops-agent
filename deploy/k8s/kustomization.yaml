@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ops-agent T2 部署:ingress(serve)+ worker(serve-worker)+ Redis 队列后端。
+# 用法:kubectl apply -k deploy/k8s/   (先按需覆盖 image / secret / 副本数)
+
+commonLabels:
+  app.kubernetes.io/part-of: ops-agent
+
+resources:
+  - config.yaml      # ConfigMap + Secret(示例)
+  - redis.yaml       # 起步级单实例 Redis + PVC + Service
+  - ingress.yaml     # serve Deployment + Service + HPA
+  - worker.yaml      # serve-worker Deployment + HPA
+
+# 真部署常见覆盖(放到 overlay 里):
+#   images:
+#     - name: ghcr.io/pinpols/ops-agent
+#       newTag: v0.x.y
+#   replicas:
+#     - name: ops-agent-worker
+#       count: 4
