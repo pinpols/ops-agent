@@ -7,6 +7,7 @@
 单次:        python -m ops_agent.agent "sim 跑批为什么慢?"
 """
 
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -137,8 +138,14 @@ def run_agent(
             )
         usage = getattr(resp, "usage", None)
         if usage is not None:
-            total_in += getattr(usage, "input_tokens", 0) or 0
-            total_out += getattr(usage, "output_tokens", 0) or 0
+            in_tok = getattr(usage, "input_tokens", 0) or 0
+            out_tok = getattr(usage, "output_tokens", 0) or 0
+            total_in += in_tok
+            total_out += out_tok
+            # 每次调用即记累计 token,而非仅成功路径 —— 否则预算击杀/截断/max_steps 这些
+            # 最烧钱的失控 run 完全不计入花费看板(审计发现的成本盲区)。
+            METRICS.inc("llm_input_tokens_total", in_tok)
+            METRICS.inc("llm_output_tokens_total", out_tok)
         messages.append({"role": "assistant", "content": resp.content})
 
         tool_uses = [b for b in resp.content if b.type == "tool_use"]
@@ -246,9 +253,7 @@ def run_agent(
         # 每轮只 append 一次(修正旧实现 report 分支 + 循环尾的双 append)。
         messages.append({"role": "user", "content": results})
         if diagnosis is not None:
-            METRICS.inc("diagnose_succeeded_total")
-            METRICS.inc("llm_input_tokens_total", total_in)
-            METRICS.inc("llm_output_tokens_total", total_out)
+            METRICS.inc("diagnose_succeeded_total")  # token 计量已在每步累加,不在此重复 inc
             _flush_metrics(settings)
             if settings.ops_trace_dir:
                 write_agent_trace(
@@ -275,6 +280,15 @@ def _flush_metrics(settings: Settings) -> None:
     """配了 OPS_METRICS_FILE 就把累计指标原子写成 Prometheus textfile(否则只留进程内)。"""
     if settings.ops_metrics_file:
         METRICS.write_textfile(settings.ops_metrics_file)
+
+
+_TARGET_PREFIX_RE = re.compile(r"^\s*\[target=([^\]]+)\]")
+
+
+def _extract_target(question: str) -> str | None:
+    """从 server 注入的 `[target=X] ...` 前缀解析 target,供历史库按 target 过滤。"""
+    m = _TARGET_PREFIX_RE.match(question)
+    return m.group(1).strip() if m else None
 
 
 def _record_history(
@@ -304,6 +318,7 @@ def _record_history(
                     root_cause=diagnosis.root_cause,
                     confidence=diagnosis.confidence,
                     question=question,
+                    target=_extract_target(question),  # 否则 history --target 永远查不到(列恒 NULL)
                     model=model,
                     prompt_version=PROMPT_VERSION,
                     trace_id=trace_id,
