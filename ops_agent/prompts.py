@@ -37,3 +37,15 @@ def fence_untrusted(text: str) -> str:
     """
     safe = text.replace(UNTRUSTED_CLOSE, "U_T_O_>>>").replace(UNTRUSTED_OPEN, "<<<_U_T_O")
     return f"{UNTRUSTED_OPEN}\n{safe}\n{UNTRUSTED_CLOSE}"
+
+
+def fence_tool_output(text: str, *, redact: bool) -> str:
+    """工具输出喂回 LLM 前的**单一规范处理**:脱敏(出网防明文凭据外泄)→ 不可信围栏(纵深防注入)。
+
+    四条诊断路径的安全姿态曾各自复制这两步并漂移(diagnose_log/investigate/graph 一度缺围栏,
+    造成真实注入敞口)。收敛到这一处,新增取证路径直接调它即可,不再靠人工复制 + 测试守一致。
+    延迟 import redact_text:避免 prompts 在 import 期拉起 redaction 依赖(健康探针应轻)。
+    """
+    from ops_agent.redaction import redact_text
+
+    return fence_untrusted(redact_text(text) if redact else text)
