@@ -254,6 +254,8 @@ def run_agent(
         messages.append({"role": "user", "content": results})
         if diagnosis is not None:
             METRICS.inc("diagnose_succeeded_total")  # token 计量已在每步累加,不在此重复 inc
+            if diagnosis.needs_human_review:
+                METRICS.inc("diagnose_needs_review_total")  # 转人工率:观测低把握/高代价占比
             _flush_metrics(settings)
             if settings.ops_trace_dir:
                 write_agent_trace(

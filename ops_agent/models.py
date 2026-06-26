@@ -6,7 +6,12 @@
 
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
+
+# 转人工阈值。confidence 是模型自评、且相邻 severity 会 run-to-run 摆动(eval 实测),
+# 所以低把握、或高代价(CRITICAL)且把握不足时,不该让下游告警系统据此自动动作。
+REVIEW_CONFIDENCE_FLOOR = 0.6  # 任何低于此把握 → 转人工
+CRITICAL_REVIEW_FLOOR = 0.8  # CRITICAL 误报代价高 → 要求更高把握才放行
 
 
 class Severity(StrEnum):
@@ -35,3 +40,16 @@ class Diagnosis(BaseModel):
     confidence: float = Field(
         ge=0.0, le=1.0, description="对该诊断的置信度 0~1;证据弱就给低分,别一律 0.9"
     )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def needs_human_review(self) -> bool:
+        """是否该转人工复核 —— 供下游告警系统路由的派生信号(不是模型填的字段)。
+
+        派生而非让模型自评:① confidence 已是模型自评,再让它自评"要不要人看"会双重乐观;
+        ② computed_field 是只读序列化字段,不进 report_diagnosis 的 input_schema,模型看不到、
+        改不了。低把握、或高代价(CRITICAL)却把握不足 → 转人工,别让下游据此自动动作。
+        """
+        if self.confidence < REVIEW_CONFIDENCE_FLOOR:
+            return True
+        return self.severity == Severity.CRITICAL and self.confidence < CRITICAL_REVIEW_FLOOR
