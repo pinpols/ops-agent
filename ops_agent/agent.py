@@ -65,7 +65,78 @@ def _console_approver(tool_name: str, tool_input: dict) -> bool:
 def _safe_tool_input(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
+    # 非 dict 入参塞进 {"_raw": ...};impl(**{"_raw":...}) 会 TypeError,被工具边界兜成 failure
     return {"_raw": value}
+
+
+def _execute_tool_call(
+    tu: Any,
+    tool_input: dict[str, Any],
+    *,
+    step: int,
+    approve: Callable[[str, dict], bool],
+    settings: Settings,
+    trace: list[AgentStepTrace],
+) -> dict[str, Any]:
+    """执行一个(非 report、未被跳过的)工具调用 → 围栏化 tool_result。
+
+    把安全关键的"取证一跳"从 run_agent 主循环抽成单一可读单元:
+    审批闸(HITL)→ 执行 → 危险动作执行审计 → 指标 → 脱敏 → 记 trace → 不可信围栏。
+    """
+    approved: bool | None = None
+    if tu.name in DANGEROUS_TOOLS:
+        approved = approve(tu.name, tool_input)
+        append_approval_record(
+            settings.ops_approval_log,
+            tool_name=tu.name,
+            tool_input=tool_input,
+            approved=approved,
+        )
+    if approved is False:
+        result = ToolResult.failure(
+            f"[审批] 用户拒绝执行 {tu.name}({tool_input}),未执行。",
+            error_type="approval_denied",
+        )
+    else:
+        impl = _ALL_IMPLS.get(tu.name)
+        if impl is None:
+            result = ToolResult.failure(f"unknown tool {tu.name}", error_type="unknown_tool")
+        else:
+            try:
+                result = impl(**tool_input)
+            except Exception as e:  # noqa: BLE001 - tool boundary
+                result = ToolResult.failure(
+                    f"[{tu.name}] 工具异常:{type(e).__name__}: {e}",
+                    error_type="tool_exception",
+                )
+    # 危险动作批准后留执行结果痕(成败 / dry-run),补"只记批没批"的审计盲区
+    if tu.name in DANGEROUS_TOOLS and approved:
+        append_execution_record(
+            settings.ops_approval_log,
+            tool_name=tu.name,
+            ok=result.ok,
+            dry_run=bool(result.metadata.get("dry_run", False)),
+            detail=result.error,
+        )
+    METRICS.inc("tool_calls_total", tool=tu.name, ok=str(result.ok).lower())
+    # 出网到 LLM + 落 trace 前统一脱敏,防 Spring 配置 / SQL 结果 / 日志里的明文凭据外泄。
+    output = result.to_text()
+    if settings.ops_redact_artifacts:
+        output = redact_text(output)
+    trace.append(
+        AgentStepTrace(
+            step=step,
+            tool_name=tu.name,
+            tool_input=tool_input,
+            ok=result.ok,
+            output=output,
+            error=result.error,
+            approved=approved,
+            metadata=result.metadata,
+        )
+    )
+    # 喂回 LLM 前包进不可信围栏:结构上把"工具数据"与"指令"隔开,纵深防 prompt 注入。
+    return {"type": "tool_result", "tool_use_id": tu.id, "content": fence_untrusted(str(output))}
 
 
 @observe
@@ -186,69 +257,11 @@ def run_agent(
                     }
                 )
                 continue
-            # 危险工具:执行前过审批闸(HITL)
-            approved: bool | None = None
-            if tu.name in DANGEROUS_TOOLS:
-                approved = approve(tu.name, tool_input)
-                append_approval_record(
-                    settings.ops_approval_log,
-                    tool_name=tu.name,
-                    tool_input=tool_input,
-                    approved=approved,
-                )
-            if approved is False:
-                result = ToolResult.failure(
-                    f"[审批] 用户拒绝执行 {tu.name}({tool_input}),未执行。",
-                    error_type="approval_denied",
-                )
-            else:
-                impl = _ALL_IMPLS.get(tu.name)
-                if impl is None:
-                    result = ToolResult.failure(
-                        f"unknown tool {tu.name}", error_type="unknown_tool"
-                    )
-                else:
-                    try:
-                        result = impl(**tool_input)
-                    except Exception as e:  # noqa: BLE001 - tool boundary
-                        result = ToolResult.failure(
-                            f"[{tu.name}] 工具异常:{type(e).__name__}: {e}",
-                            error_type="tool_exception",
-                        )
-            # 危险动作批准后留执行结果痕(成败 / dry-run),补"只记批没批"的审计盲区
-            if tu.name in DANGEROUS_TOOLS and approved:
-                append_execution_record(
-                    settings.ops_approval_log,
-                    tool_name=tu.name,
-                    ok=result.ok,
-                    dry_run=bool(result.metadata.get("dry_run", False)),
-                    detail=result.error,
-                )
-            METRICS.inc("tool_calls_total", tool=tu.name, ok=str(result.ok).lower())
-            # 工具输出在喂回 LLM(出网到 Anthropic)+ 落 trace 前统一脱敏,
-            # 防 Spring 配置 / SQL 结果 / 日志里的明文凭据外泄。
-            output = result.to_text()
-            if settings.ops_redact_artifacts:
-                output = redact_text(output)
-            trace.append(
-                AgentStepTrace(
-                    step=step,
-                    tool_name=tu.name,
-                    tool_input=tool_input,
-                    ok=result.ok,
-                    output=output,
-                    error=result.error,
-                    approved=approved,
-                    metadata=result.metadata,
-                )
-            )
-            # 喂回 LLM 前包进不可信围栏:结构上把"工具数据"与"指令"隔开,纵深防 prompt 注入。
+            # 取证一跳(审批闸 → 执行 → 审计 → 脱敏 → trace → 围栏)抽到 _execute_tool_call
             results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tu.id,
-                    "content": fence_untrusted(str(output)),
-                }
+                _execute_tool_call(
+                    tu, tool_input, step=step, approve=approve, settings=settings, trace=trace
+                )
             )
         # 每轮只 append 一次(修正旧实现 report 分支 + 循环尾的双 append)。
         messages.append({"role": "user", "content": results})

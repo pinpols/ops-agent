@@ -15,9 +15,12 @@ worker 崩溃/重启可恢复,可水平扩展。
 import json
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import WatchError
+
+if TYPE_CHECKING:
+    from ops_agent.config import Settings
 
 from ops_agent.jobqueue import FAILED, QUEUED, RUNNING, SUCCEEDED, DiagnosisJob
 from ops_agent.metrics import METRICS
@@ -59,6 +62,23 @@ class RedisQueue:
 
         client = redis.from_url(url, decode_responses=True)
         return cls(client, **kwargs)
+
+    @classmethod
+    def from_settings(cls, settings: "Settings") -> "RedisQueue":
+        """从 Settings 一处映射构造 —— 收口 server/worker/cli 三处重复的参数拼装(DRY 工厂)。"""
+        if settings.ops_queue_backend != "redis" or not settings.ops_redis_url:
+            raise ValueError("Redis 队列需 OPS_QUEUE_BACKEND=redis + OPS_REDIS_URL")
+        return cls.from_url(
+            settings.ops_redis_url,
+            queue_key=settings.ops_queue_key,
+            dlq_key=settings.ops_dlq_key,
+            max_queue=settings.ops_queue_max,
+            job_ttl=settings.ops_job_ttl_seconds,
+            max_retries=settings.ops_max_retries,
+            retry_base_seconds=settings.ops_retry_base_seconds,
+            retry_max_seconds=settings.ops_retry_max_seconds,
+            queue_depth_alert_threshold=settings.ops_queue_depth_alert_threshold,
+        )
 
     # ── 序列化 ────────────────────────────────────────────────
     def _job_key(self, job_id: str) -> str:

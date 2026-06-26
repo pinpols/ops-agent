@@ -12,28 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from ops_agent.config import Settings, get_settings
+from ops_agent.queue_backend import WorkerQueue
 from ops_agent.redisqueue import RedisQueue
 
 logger = logging.getLogger("ops_agent.worker")
 
 
 def build_redis_queue(settings: Settings) -> RedisQueue:
-    if settings.ops_queue_backend != "redis" or not settings.ops_redis_url:
-        raise ValueError("worker 需 OPS_QUEUE_BACKEND=redis + OPS_REDIS_URL")
-    return RedisQueue.from_url(
-        settings.ops_redis_url,
-        queue_key=settings.ops_queue_key,
-        dlq_key=settings.ops_dlq_key,
-        max_queue=settings.ops_queue_max,
-        job_ttl=settings.ops_job_ttl_seconds,
-        max_retries=settings.ops_max_retries,
-        retry_base_seconds=settings.ops_retry_base_seconds,
-        retry_max_seconds=settings.ops_retry_max_seconds,
-        queue_depth_alert_threshold=settings.ops_queue_depth_alert_threshold,
-    )
+    return RedisQueue.from_settings(settings)
 
 
-def process_once(rq: RedisQueue, handler: Any, timeout: int = 1) -> str | None:
+def process_once(rq: WorkerQueue, handler: Any, timeout: int = 1) -> str | None:
     """取一个任务并处理。无任务返回 None;否则返回最终 outcome(succeeded/retried/dead)。"""
     job_id = rq.consume(timeout=timeout)
     if job_id is None:
@@ -77,7 +66,7 @@ def _touch_heartbeat(path: Path | None) -> None:
         logger.warning("心跳文件写入失败 %s: %s", path, exc)
 
 
-def _worker_loop(rq: RedisQueue, handler: Any, stop: threading.Event) -> None:
+def _worker_loop(rq: WorkerQueue, handler: Any, stop: threading.Event) -> None:
     while not stop.is_set():
         try:
             process_once(rq, handler, timeout=1)
