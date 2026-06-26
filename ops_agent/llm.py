@@ -23,7 +23,13 @@ class _Block(dict):
     """双访问内容块:既支持属性(``b.type`` / ``b.input``,ops-agent 消费用),
     又是 dict(``b.get('type')``,网关 openai 互译 tooltrans 用)。多轮工具对话两端都要。"""
 
-    __getattr__ = dict.get
+    def __getattr__(self, name: str) -> object:
+        # 缺失键抛 AttributeError(对齐原生 SDK block),而非 dict.get 的静默 None ——
+        # 否则 getattr(block, 'thinking', default) / hasattr 分支只在 gateway 路径静默误判。
+        try:
+            return self[name]
+        except KeyError as e:
+            raise AttributeError(name) from e
 
 
 class LLMClient(Protocol):

@@ -177,30 +177,85 @@ class RedisQueue:
         self._r.hset(self._job_key(job_id), "status", RUNNING)
 
     def complete(self, job_id: str, result: dict) -> None:
+        """标记成功。**原子 + 终态守卫**:WATCH 状态 → 仅当未终态/未丢失才写。
+
+        避免迟到的 complete 覆写一个已被(重复投递的)另一 worker 写成 FAILED 的 job,
+        也避免在 hash 已 TTL 过期后用 hset 重建一个无 question/无 TTL 的僵尸。
+        """
         key = self._job_key(job_id)
-        self._r.hset(key, mapping={"status": SUCCEEDED, "result": json.dumps(result), "error": ""})
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(key)
+                    status = pipe.hget(key, "status")
+                    if status is None or status in (SUCCEEDED, FAILED):
+                        pipe.unwatch()
+                        return  # 哈希已丢失 / 已终态 → 不覆写、不复活
+                    pipe.multi()
+                    pipe.hset(
+                        key,
+                        mapping={"status": SUCCEEDED, "result": json.dumps(result), "error": ""},
+                    )
+                    pipe.execute()
+                    break
+                except WatchError:
+                    continue
         METRICS.inc("jobs_succeeded_total")
         self.update_queue_metrics()
 
     def fail_or_retry(self, job_id: str, error: str) -> str:
-        """失败处理:未超重试上限 → 重新入队(返回 'retried');否则 → DLQ(返回 'dead')。"""
+        """失败处理:未超上限 → 重入队('retried');超限 → DLQ('dead');哈希已丢失 → 'lost'。
+
+        **原子 + 终态/存在守卫**(WATCH/MULTI):
+        - 旧实现 `hincrby` 在 hash 已 TTL 过期时会**重建一个无 TTL、丢了 question 的僵尸 job**
+          并被当空诊断处理 —— 这里先 WATCH+读状态,缺失则判 lost、不复活。
+        - 旧实现无终态守卫:已 SUCCEEDED 的 job 被迟到 retry 覆写回 QUEUED → 重复诊断 + 状态翻转。
+        - hincrby/hset/zadd 三步非原子 → 改为 MULTI 单事务。
+        """
         key = self._job_key(job_id)
-        attempts = int(self._r.hincrby(key, "attempts", 1))
-        if attempts <= self._max_retries:
-            retry_after = time.time() + self._retry_delay(attempts)
-            self._r.hset(
-                key,
-                mapping={"status": QUEUED, "error": error, "retry_after": str(retry_after)},
-            )
-            self._r.zadd(self._retry_key, {job_id: retry_after})
-            METRICS.inc("jobs_retried_total")
-            self.update_queue_metrics()
-            return "retried"
-        self._r.hset(key, mapping={"status": FAILED, "error": error})
-        self._r.lpush(self._dlq_key, job_id)
-        METRICS.inc("jobs_failed_total")
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(key)
+                    status = pipe.hget(key, "status")
+                    if status is None:
+                        pipe.unwatch()
+                        METRICS.inc("jobs_lost_total")
+                        return "lost"  # 哈希已丢失(TTL/驱逐)→ 不用 hincrby 复活僵尸
+                    if status in (SUCCEEDED, FAILED):
+                        pipe.unwatch()
+                        return "dead" if status == FAILED else "succeeded"  # 已终态,不重处理
+                    attempts = int(pipe.hget(key, "attempts") or 0) + 1
+                    if attempts <= self._max_retries:
+                        retry_after = time.time() + self._retry_delay(attempts)
+                        pipe.multi()
+                        pipe.hset(
+                            key,
+                            mapping={
+                                "attempts": str(attempts),
+                                "status": QUEUED,
+                                "error": error,
+                                "retry_after": str(retry_after),
+                            },
+                        )
+                        pipe.zadd(self._retry_key, {job_id: retry_after})
+                        pipe.execute()
+                        outcome, metric = "retried", "jobs_retried_total"
+                    else:
+                        pipe.multi()
+                        pipe.hset(
+                            key,
+                            mapping={"attempts": str(attempts), "status": FAILED, "error": error},
+                        )
+                        pipe.lpush(self._dlq_key, job_id)
+                        pipe.execute()
+                        outcome, metric = "dead", "jobs_failed_total"
+                    break
+                except WatchError:
+                    continue
+        METRICS.inc(metric)
         self.update_queue_metrics()
-        return "dead"
+        return outcome
 
     def _retry_delay(self, attempts: int) -> float:
         if self._retry_base_seconds <= 0:

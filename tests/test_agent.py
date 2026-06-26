@@ -171,6 +171,37 @@ class AgentLoopTest(unittest.TestCase):
         self.assertIn('"input_tokens": 250', content)  # 100 + 150
         self.assertIn('"output_tokens": 50', content)  # 20 + 30
 
+    def test_extract_target_parses_server_prefix(self):
+        self.assertEqual(agent._extract_target("[target=fbs] 为什么慢"), "fbs")
+        self.assertEqual(agent._extract_target("[target=worker-import] x"), "worker-import")
+        self.assertIsNone(agent._extract_target("没有前缀的问题"))
+
+    @patch("ops_agent.agent.make_client")
+    def test_tokens_recorded_even_when_run_fails_max_steps(self, anthropic_cls):
+        # 回归:失控 run(绕圈撞 max_steps)的 token 也要计入累计指标,不是只成功路径计。
+        from ops_agent.metrics import METRICS
+
+        def _ru(*b, in_tok, out_tok):
+            return SimpleNamespace(
+                content=list(b),
+                stop_reason="tool_use",
+                usage=SimpleNamespace(input_tokens=in_tok, output_tokens=out_tok),
+            )
+
+        anthropic_cls.return_value.messages.create.side_effect = [
+            _ru(
+                _tu(str(i), "read_logs", {"service": "console", "max_lines": 1}),
+                in_tok=10,
+                out_tok=5,
+            )
+            for i in range(3)
+        ]
+        before = METRICS.snapshot().get(("llm_input_tokens_total", ()), 0)
+        with self.assertRaises(RuntimeError):
+            agent.run_agent("绕圈不收口", max_steps=2)
+        after = METRICS.snapshot().get(("llm_input_tokens_total", ()), 0)
+        self.assertGreater(after, before)  # 失败 run 的 token 计入了
+
 
 _VALID_REPORT = {
     "severity": "INFO",

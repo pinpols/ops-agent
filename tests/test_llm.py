@@ -23,5 +23,22 @@ class MakeClientTest(unittest.TestCase):
         self.assertGreaterEqual(anthropic.call_args.kwargs.get("max_retries"), 4)
 
 
+class BlockDualAccessTest(unittest.TestCase):
+    def test_block_supports_attr_and_dict_access(self):
+        b = llm._Block({"type": "tool_use", "input": {"x": 1}})
+        self.assertEqual(b.type, "tool_use")  # 属性访问(ops-agent)
+        self.assertEqual(b.get("type"), "tool_use")  # dict 访问(tooltrans)
+        self.assertEqual(b.input, {"x": 1})
+
+    def test_missing_attr_raises_not_silent_none(self):
+        # 回归:缺失属性必须抛 AttributeError(对齐原生 SDK),不能像 dict.get 静默返 None,
+        # 否则 getattr(block, 'thinking', default)/hasattr 分支只在 gateway 路径静默误判。
+        b = llm._Block({"type": "text"})
+        with self.assertRaises(AttributeError):
+            _ = b.thinking
+        self.assertFalse(hasattr(b, "nonexistent"))
+        self.assertEqual(getattr(b, "missing", "dflt"), "dflt")  # 默认值机制恢复正常
+
+
 if __name__ == "__main__":
     unittest.main()
