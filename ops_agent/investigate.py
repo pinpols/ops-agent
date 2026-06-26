@@ -14,8 +14,7 @@ from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
 from ops_agent.llm import make_client
 from ops_agent.models import Diagnosis
-from ops_agent.prompts import UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fence_untrusted
-from ops_agent.redaction import redact_text
+from ops_agent.prompts import UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fence_tool_output
 from ops_agent.tools import READ_LOGS_TOOL, TOOL_IMPLS
 
 _SYSTEM_PROMPT = (
@@ -65,15 +64,14 @@ def investigate(question: str, *, max_tokens: int = 4096) -> Diagnosis:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "ok"})
             elif tu.name in TOOL_IMPLS:
                 output = TOOL_IMPLS[tu.name](**tu.input)  # 真执行(read_logs)
-                # 出网到 LLM 前:脱敏(防明文凭据外泄)+ 不可信围栏(纵深防 prompt 注入),
-                # 与 run_agent / diagnose_log 同一安全姿态(修审计发现的注入漂移)。
-                if get_settings().ops_redact_artifacts:
-                    output = redact_text(output)
+                # 出网到 LLM 前的脱敏 + 围栏走单一规范处理(四路共用,杜绝姿态漂移)。
                 results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": tu.id,
-                        "content": fence_untrusted(str(output)),
+                        "content": fence_tool_output(
+                            str(output), redact=get_settings().ops_redact_artifacts
+                        ),
                     }
                 )
             else:

@@ -17,8 +17,7 @@ from langchain_core.tools import tool
 
 from ops_agent.config import get_settings
 from ops_agent.models import Diagnosis
-from ops_agent.prompts import UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fence_untrusted
-from ops_agent.redaction import redact_text
+from ops_agent.prompts import UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fence_tool_output
 from ops_agent.system_tools import (
     inspect_compose as _inspect_compose,
 )
@@ -48,12 +47,8 @@ _SYSTEM_PROMPT = (
 
 
 def _safe(text: str) -> str:
-    """工具结果喂回 LLM(出网)前:脱敏 + 不可信围栏,与 run_agent/diagnose_log 同一安全姿态。
-
-    旧实现只脱敏不围栏 —— 留了 prompt 注入漂移(审计发现)。围栏让模型结构上区分数据与指令。
-    """
-    redacted = redact_text(text) if get_settings().ops_redact_artifacts else text
-    return fence_untrusted(redacted)
+    """工具结果喂回 LLM(出网)前:脱敏 + 不可信围栏,四路共用 fence_tool_output 单一规范处理。"""
+    return fence_tool_output(text, redact=get_settings().ops_redact_artifacts)
 
 
 # LangChain 工具 = 给我们已有的纯函数套一层(docstring 会作为 description 发给模型,和裸 SDK 一样)
