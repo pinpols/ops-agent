@@ -126,7 +126,6 @@ RESTART_TOOL = {
     },
 }
 
-# 危险工具集合:agent 调它们前必须过审批闸
-DANGEROUS_TOOLS = {"restart_service"}
+# 危险标记现由 tool_registry 单一声明(Tool(..., dangerous=True)),不再在此另立一份,防双源漂移。
 EXEC_TOOL_IMPLS = {"restart_service": restart_service}
 EXEC_TOOL_RESULT_IMPLS = {"restart_service": restart_service_result}
