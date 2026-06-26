@@ -684,4 +684,100 @@ CASES: list[Case] = [
         expected_severity=Severity.INFO,
         is_normal=True,
     ),
+    # ── Flink 流作业 ─────────────────────────────────────────
+    Case(
+        id="flink_checkpoint_failures",
+        log_text=(
+            "2026-06-22T09:01:11.220+08:00 WARN  o.a.f.r.checkpoint.CheckpointCoordinator - "
+            "Checkpoint 842 of job 0a1b2c3d expired before completing (timeout 600000ms)\n"
+            "2026-06-22T09:11:13.880+08:00 WARN  CheckpointCoordinator - Checkpoint 843 expired; "
+            "3 consecutive failed checkpoints, last successful checkpoint 31m ago"
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["checkpoint", "842"],
+    ),
+    Case(
+        id="flink_job_restart_loop",
+        log_text=(
+            "2026-06-22T09:30:02.140+08:00 INFO  o.a.f.r.executiongraph.ExecutionGraph - "
+            "Job orders-enrich (0a1b2c3d) switched from RUNNING to RESTARTING\n"
+            "2026-06-22T09:30:48.700+08:00 WARN  ExecutionGraph - restart count=14 in 10m, "
+            "fixed-delay restart strategy looping"
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["restarting", "0a1b2c3d"],
+    ),
+    Case(
+        id="flink_backpressure",
+        log_text=(
+            "2026-06-22T10:02:00.000+08:00 WARN  o.a.f.r.rest - job 0a1b2c3d vertex "
+            "Window(aggregate) backpressure ratio 0.96 (HIGH), busyTimeMsPerSecond=980\n"
+            "2026-06-22T10:02:30.000+08:00 WARN  upstream source throttled by backpressure"
+        ),
+        expected_severity=Severity.WARNING,
+        expected_keywords=["backpressure"],
+    ),
+    Case(
+        id="flink_source_lag",
+        log_text=(
+            "2026-06-22T10:20:00.000+08:00 WARN  o.a.f.connector.kafka - consumer group "
+            "flink-orders records-lag-max=1284000 topic=orders partition=3 and growing\n"
+            "2026-06-22T10:20:30.000+08:00 WARN  source 21m behind, throughput < ingest rate"
+        ),
+        expected_severity=Severity.WARNING,
+        expected_keywords=["lag", "orders"],
+    ),
+    Case(
+        id="flink_taskmanager_lost",
+        log_text=(
+            "2026-06-22T11:00:09.330+08:00 WARN  o.a.f.r.taskexecutor.TaskExecutor - "
+            "TaskManager flink-tm-3:45123 heartbeat timeout, marking as no longer reachable\n"
+            "2026-06-22T11:00:09.900+08:00 ERROR ResourceManager - lost TaskManager, "
+            "job 0a1b2c3d failed: org.apache.flink.util.FlinkException: TaskManager was lost"
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["taskmanager", "0a1b2c3d"],
+    ),
+    Case(
+        id="flink_oom_rocksdb_state",
+        log_text=(
+            "2026-06-22T11:30:02.700+08:00 ERROR o.a.f.r.taskexecutor.TaskExecutor - "
+            "java.lang.OutOfMemoryError: Direct buffer memory\n"
+            "Caused by: RocksDB state backend exceeded managed memory budget on operator "
+            "keyed-state, taskmanager.memory.managed too small for state size"
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["rocksdb", "outofmemoryerror"],
+    ),
+    Case(
+        id="flink_kafka_offset_stuck",
+        log_text=(
+            "2026-06-22T12:00:00.000+08:00 WARN  o.a.f.connector.kafka.source - committed "
+            "offset for topic=payments partition=0 not advancing (stuck at 99213) for 8m\n"
+            "2026-06-22T12:00:30.000+08:00 WARN  source emitted 0 records last 8m"
+        ),
+        expected_severity=Severity.WARNING,
+        expected_keywords=["offset", "payments"],
+    ),
+    Case(
+        id="flink_savepoint_timeout",
+        log_text=(
+            "2026-06-22T12:30:00.000+08:00 WARN  o.a.f.r.checkpoint - Savepoint for job "
+            "0a1b2c3d timed out after 600000ms (target hdfs:///savepoints/), aborting\n"
+            "2026-06-22T12:30:01.000+08:00 WARN  savepoint trigger failed, job kept RUNNING"
+        ),
+        expected_severity=Severity.WARNING,
+        expected_keywords=["savepoint"],
+    ),
+    Case(
+        id="flink_healthy_normal",
+        log_text=(
+            "2026-06-22T13:00:00.000+08:00 INFO  o.a.f.r.checkpoint.CheckpointCoordinator - "
+            "Completed checkpoint 1200 for job 0a1b2c3d in 1203ms (size 84MB)\n"
+            "2026-06-22T13:00:05.000+08:00 INFO  ExecutionGraph - all 12 tasks RUNNING, "
+            "restart count=0, no backpressure"
+        ),
+        expected_severity=Severity.INFO,
+        is_normal=True,
+    ),
 ]

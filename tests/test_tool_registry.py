@@ -4,6 +4,7 @@ import unittest
 
 from ops_agent import tool_registry as tr
 from ops_agent.exec_tools import EXEC_TOOL_RESULT_IMPLS
+from ops_agent.flink_tools import QUERY_FLINK_TOOL_RESULT_IMPLS
 from ops_agent.metrics_tools import QUERY_METRICS_TOOL_RESULT_IMPLS
 from ops_agent.system_tools import SYSTEM_TOOL_RESULT_IMPLS
 from ops_agent.tools import TOOL_RESULT_IMPLS
@@ -16,6 +17,7 @@ class ToolRegistryTest(unittest.TestCase):
             **SYSTEM_TOOL_RESULT_IMPLS,
             **TOOL_RESULT_IMPLS,
             **QUERY_METRICS_TOOL_RESULT_IMPLS,
+            **QUERY_FLINK_TOOL_RESULT_IMPLS,
             **EXEC_TOOL_RESULT_IMPLS,
         }
         self.assertEqual(tr.RESULT_IMPLS, expected)
@@ -39,6 +41,7 @@ class ToolRegistryTest(unittest.TestCase):
                 "query_metrics",
                 "query_pg_template",
                 "query_pg",
+                "query_flink_rest",
                 "restart_service",
             ],
         )
