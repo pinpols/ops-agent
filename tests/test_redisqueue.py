@@ -226,7 +226,7 @@ class WorkerRunLifecycleTest(unittest.TestCase):
                 patch.object(worker_main, "build_redis_queue", return_value=fake_rq),
                 # signal.signal 只能在主线程注册;捕获而不真注册,以便在子线程跑 run()
                 patch.object(worker_main.signal, "signal", lambda s, h: handlers.__setitem__(s, h)),
-                patch("ops_agent.server.diagnosis_job_handler", lambda job: {}),
+                patch("ops_agent.jobs.diagnosis_job_handler", lambda job: {}),
             ):
                 t = threading.Thread(target=worker_main.run, daemon=True)
                 t.start()

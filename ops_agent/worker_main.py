@@ -79,9 +79,9 @@ def run(settings: Settings | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = settings or get_settings()
     rq = build_redis_queue(settings)
-    # 延迟 import:复用 ingress 端的只读诊断 handler(注入全拒审批闸 + 回调)。
+    # 复用诊断任务内核(注入全拒审批闸 + 回调)。直接 import jobs,解掉 worker→server 反向依赖。
+    from ops_agent.jobs import diagnosis_job_handler
     from ops_agent.metrics import METRICS
-    from ops_agent.server import diagnosis_job_handler
 
     worker_count = max(1, settings.ops_worker_count)
     METRICS.set("workers_total", worker_count, backend="redis")  # 利用率分母

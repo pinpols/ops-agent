@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ops_agent import server
+from ops_agent import callback, server
 from ops_agent.audit import append_approval_record
 from ops_agent.budget import BudgetExceeded
 from ops_agent.models import Diagnosis, Severity
@@ -340,7 +340,7 @@ class CallbackPolicyTest(unittest.TestCase):
                 },
                 clear=True,
             ),
-            patch("ops_agent.server._post_https_callback_pinned") as pinned,
+            patch("ops_agent.callback._post_https_callback_pinned") as pinned,
         ):
             server._post_callback(job, status="succeeded", result={"ok": True})
         self.assertEqual(pinned.call_count, 1)
@@ -348,13 +348,13 @@ class CallbackPolicyTest(unittest.TestCase):
     def test_prod_callback_error_is_sanitized(self):
         with patch.dict("os.environ", {"OPS_PROFILE": "prod"}, clear=True):
             self.assertEqual(
-                server._callback_error(RuntimeError("dsn=password secret")),
+                callback._callback_error(RuntimeError("dsn=password secret")),
                 "RuntimeError: callback_error",
             )
 
     def test_callback_request_formats_ipv6_host_header(self):
-        req = server._build_callback_http_request(
-            server.urlparse("https://[2606:4700:4700::1111]:8443/cb?x=1"),
+        req = callback._build_callback_http_request(
+            callback.urlparse("https://[2606:4700:4700::1111]:8443/cb?x=1"),
             b"{}",
         )
         self.assertIn(b"POST /cb?x=1 HTTP/1.1\r\n", req)
@@ -396,7 +396,7 @@ class CallbackPolicyTest(unittest.TestCase):
             patch.dict("os.environ", {"HTTPS_PROXY": "http://proxy.local:8080"}, clear=True),
             patch("socket.create_connection", return_value=fake) as create_connection,
         ):
-            sock = server._open_callback_tcp_stream(
+            sock = callback._open_callback_tcp_stream(
                 ipaddress.ip_address("1.1.1.1"),
                 "callback.example.com",
                 443,
@@ -443,7 +443,7 @@ class CallbackPolicyTest(unittest.TestCase):
             ),
             patch("socket.create_connection", return_value=fake),
         ):
-            server._open_callback_tcp_stream(
+            callback._open_callback_tcp_stream(
                 ipaddress.ip_address("1.1.1.1"),
                 "callback.example.com",
                 443,
@@ -503,12 +503,12 @@ class CallbackPolicyTest(unittest.TestCase):
                 with (
                     patch.dict(os.environ, {}, clear=True),
                     patch(
-                        "ops_agent.server._resolve_callback_public_addresses",
+                        "ops_agent.callback._resolve_callback_public_addresses",
                         return_value=([ipaddress.ip_address("127.0.0.1")], "ok"),
                     ),
-                    patch("ops_agent.server.ssl.create_default_context", return_value=client_ctx),
+                    patch("ops_agent.callback.ssl.create_default_context", return_value=client_ctx),
                 ):
-                    server._post_https_callback_pinned(
+                    callback._post_https_callback_pinned(
                         f"https://callback.test:{port}/cb?x=1", b'{"ok": true}'
                     )
             finally:
