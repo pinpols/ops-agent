@@ -50,7 +50,7 @@ class QueryFlinkRestTest(unittest.TestCase):
     def test_disallowed_path_never_hits_network(self):
         with (
             patch.dict(os.environ, {"OPS_FLINK_URL": "http://flink:8081"}),
-            patch("ops_agent.flink_tools.urllib.request.urlopen") as urlopen,
+            patch("ops_agent.rest_tools.urllib.request.urlopen") as urlopen,
         ):
             r = query_flink_rest_result("/jobs/abc/stop")  # 写操作路径
         urlopen.assert_not_called()  # 白名单先拦,不出网
@@ -63,8 +63,8 @@ class QueryFlinkRestTest(unittest.TestCase):
         cm.__enter__.return_value.read.return_value = body
         with (
             patch.dict(os.environ, {"OPS_FLINK_URL": "http://flink:8081/"}),
-            patch("ops_agent.flink_tools.urllib.request.urlopen", return_value=cm),
-            patch("ops_agent.flink_tools.urllib.request.Request") as Request,
+            patch("ops_agent.rest_tools.urllib.request.urlopen", return_value=cm),
+            patch("ops_agent.rest_tools.urllib.request.Request") as Request,
         ):
             r = query_flink_rest_result("/jobs")
         self.assertTrue(r.ok)
@@ -79,7 +79,7 @@ class QueryFlinkRestTest(unittest.TestCase):
         cm.__enter__.return_value.read.return_value = body
         with (
             patch.dict(os.environ, {"OPS_FLINK_URL": "http://flink:8081"}),
-            patch("ops_agent.flink_tools.urllib.request.urlopen", return_value=cm),
+            patch("ops_agent.rest_tools.urllib.request.urlopen", return_value=cm),
         ):
             r = query_flink_rest_result("/jobs")
         self.assertTrue(r.ok)

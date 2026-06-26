@@ -780,4 +780,37 @@ CASES: list[Case] = [
         expected_severity=Severity.INFO,
         is_normal=True,
     ),
+    # ── Kafka(ISR/分区,补既有 kafka_* 之外)──────────────────
+    Case(
+        id="kafka_under_replicated_isr_shrink",
+        log_text=(
+            "2026-06-23T09:01:00.000+08:00 WARN  kafka.server.ReplicaManager - "
+            "Partition orders-3 ISR shrunk from [1,2,3] to [1], "
+            "under-replicated (min.insync.replicas=2)\n"
+            "2026-06-23T09:01:05.000+08:00 WARN  broker 2 and 3 fell out of ISR for orders-3"
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["isr", "orders-3"],
+    ),
+    Case(
+        id="kafka_offline_partitions_no_leader",
+        log_text=(
+            "2026-06-23T09:30:00.000+08:00 ERROR kafka.controller.KafkaController - "
+            "3 offline partitions detected for topic payments, no leader available\n"
+            "2026-06-23T09:30:02.000+08:00 ERROR LeaderElection failed: all replicas down "
+            "for payments-0, producers/consumers stalled"
+        ),
+        expected_severity=Severity.CRITICAL,
+        expected_keywords=["offline", "payments"],
+    ),
+    Case(
+        id="kafka_healthy_normal",
+        log_text=(
+            "2026-06-23T10:00:00.000+08:00 INFO  kafka.server.ReplicaManager - "
+            "all partitions in sync, 0 under-replicated, 0 offline\n"
+            "2026-06-23T10:00:05.000+08:00 INFO  controller: 3 brokers alive, no leader elections"
+        ),
+        expected_severity=Severity.INFO,
+        is_normal=True,
+    ),
 ]

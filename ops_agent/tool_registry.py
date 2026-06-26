@@ -13,6 +13,7 @@ from typing import Any
 
 from ops_agent.exec_tools import RESTART_TOOL, restart_service_result
 from ops_agent.flink_tools import QUERY_FLINK_TOOL, query_flink_rest_result
+from ops_agent.kafka_tools import QUERY_KAFKA_TOOL, query_kafka_rest_result
 from ops_agent.metrics_tools import QUERY_METRICS_TOOL, query_metrics_result
 from ops_agent.system_tools import (
     INSPECT_COMPOSE_TOOL,
@@ -59,6 +60,7 @@ REGISTRY: list[Tool] = [
     Tool(QUERY_PG_TEMPLATE_TOOL, query_pg_template_result),
     Tool(QUERY_PG_TOOL, query_pg_result),
     Tool(QUERY_FLINK_TOOL, query_flink_rest_result),
+    Tool(QUERY_KAFKA_TOOL, query_kafka_rest_result),
     Tool(RESTART_TOOL, restart_service_result, dangerous=True),
 ]
 

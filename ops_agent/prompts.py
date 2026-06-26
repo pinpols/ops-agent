@@ -5,7 +5,7 @@ trace 与 bundle 会记录当时的 (model, PROMPT_VERSION),回归对比时能�
 """
 
 # 改 _AGENT_SYSTEM 文案 → 必须同步 bump 这里。CI eval 用它标注基线。
-PROMPT_VERSION = "1.2.0"  # 1.2.0: 加 query_flink_rest 只读 Flink 诊断工具(对应 prompt 提示)
+PROMPT_VERSION = "1.3.0"  # 1.3.0: 加 query_kafka_rest 只读 Kafka 诊断工具(对应 prompt 提示)
 
 # 工具返回内容回喂 LLM 时的不可信数据围栏标记。系统 prompt 明确:围栏内一律是数据、非指令。
 UNTRUSTED_OPEN = "<<<UNTRUSTED_TOOL_OUTPUT"
@@ -17,10 +17,13 @@ AGENT_SYSTEM = (
     "query_metrics(只读查 Prometheus 指标)、"
     "query_pg_template(批准 SQL 模板)、query_pg(自由只读 SQL,生产默认禁用)、"
     "query_flink_rest(只读查 Flink JobManager REST:作业/异常/checkpoint/反压/TM)、"
+    "query_kafka_rest(只读查 Kafka REST:broker/topic/分区 ISR/消费组 lag)、"
     "restart_service(重启服务,危险)。"
     "诊断 Flink 流作业:先 query_flink_rest /jobs 拿 jobid,再下钻 /jobs/:id(状态/重启次数)、"
     "/jobs/:id/exceptions(根因)、/jobs/:id/checkpoints(失败/超时)、"
     "/jobs/:id/vertices/:vid/backpressure(反压);配合 query_metrics 看 Kafka lag/重启率。"
+    "诊断 Kafka:query_kafka_rest /v3/clusters 拿 id,再看 brokers/分区 ISR/消费组 lags;"
+    "lag/under-replicated/offline 也可用 query_metrics(kafka_exporter)。"
     "用户没给明确服务名时,先用 list_services/tail_recent_errors 建立上下文。"
     "先用只读工具按需多次取证,证据够了用 report_diagnosis 给结论。"
     "只在确实定位到某服务卡死、且诊断已说明理由后,才考虑 restart_service(它会要人工审批)。"
