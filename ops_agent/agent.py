@@ -183,6 +183,16 @@ def run_agent(
             tools=tools,
             messages=messages,
         )
+        # 先记 token 再判截断:截断这一轮的响应也已实际产生 token,必须计入,否则截断
+        # 这种失控 run 反而漏计花费(审计发现的成本盲区;每次调用即累加,非仅成功路径)。
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            in_tok = getattr(usage, "input_tokens", 0) or 0
+            out_tok = getattr(usage, "output_tokens", 0) or 0
+            total_in += in_tok
+            total_out += out_tok
+            METRICS.inc("llm_input_tokens_total", in_tok)
+            METRICS.inc("llm_output_tokens_total", out_tok)
         # max_tokens 截断 → 本轮 tool_use/结论可能不完整,继续会喂回部分块或撞 ValidationError。
         # 显式识别并给可操作报错,而不是静默绕圈。
         if resp.stop_reason == "max_tokens":
@@ -190,16 +200,6 @@ def run_agent(
                 f"LLM 响应被 max_tokens={max_tokens} 截断(stop_reason=max_tokens),结果可能不完整;"
                 "请调高 max_tokens 或缩小工具输出(如 read_logs 的 max_lines)。"
             )
-        usage = getattr(resp, "usage", None)
-        if usage is not None:
-            in_tok = getattr(usage, "input_tokens", 0) or 0
-            out_tok = getattr(usage, "output_tokens", 0) or 0
-            total_in += in_tok
-            total_out += out_tok
-            # 每次调用即记累计 token,而非仅成功路径 —— 否则预算击杀/截断/max_steps 这些
-            # 最烧钱的失控 run 完全不计入花费看板(审计发现的成本盲区)。
-            METRICS.inc("llm_input_tokens_total", in_tok)
-            METRICS.inc("llm_output_tokens_total", out_tok)
         messages.append({"role": "assistant", "content": resp.content})
 
         tool_uses = [b for b in resp.content if b.type == "tool_use"]

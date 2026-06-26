@@ -50,6 +50,14 @@ class ReadLogsTest(unittest.TestCase):
         self.assertIn("过于复杂", tools.read_logs("console", pattern="(a+)+$"))
         self.assertIn("pattern 过长", tools.read_logs("console", pattern="x" * 129))
 
+    def test_rejects_overlapping_alternation_redos(self):
+        # 审核发现:旧黑名单只挡嵌套量词,漏了量化的含 | 分组(重叠交替 ReDoS,可挂死 worker)
+        for redos in ("(a|a)*c", "(a|ab)+", "(x|y){3,}"):
+            self.assertIn("过于复杂", tools.read_logs("console", pattern=redos), redos)
+        # 合法的交替/分组不受影响
+        for ok in ("WARN|ERROR", "(WARN|ERROR)", "(WARN|ERROR)?"):
+            self.assertNotIn("过于复杂", tools.read_logs("console", pattern=ok), ok)
+
     def test_prod_pattern_is_literal_or_only(self):
         os.environ["OPS_PROFILE"] = "prod"
         with patch("os.access", return_value=False):

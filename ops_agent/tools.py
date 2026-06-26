@@ -19,13 +19,14 @@ _SERVICE_RE = re.compile(r"^[a-z0-9-]+$")
 _LOG_LINE_CAP = 1000
 _QUERY_ROW_CAP = 200
 _LOG_FILE_CAP = 20
-_LOG_DISCOVERY_CAP = _LOG_FILE_CAP + 1
 _LOG_SCAN_BYTES = 2 * 1024 * 1024
 _MAX_PATTERN_CHARS = 128
+# ReDoS 黑名单(best-effort;prod profile 另把 pattern 全转字面量,彻底无此风险)。
 _UNSAFE_REGEX_PATTERNS = (
-    re.compile(r"\([^)]*[+*{][^)]*\)[+*?{]"),
-    re.compile(r"\\[1-9]"),
-    re.compile(r"\(\?([=!<]|P=)"),
+    re.compile(r"\([^)]*[+*{][^)]*\)[+*?{]"),  # 嵌套量词 (X+)+
+    re.compile(r"\([^)]*\|[^)]*\)[*+{]"),  # 量化的含 | 分组 (a|a)* / (a|ab)+ —— 重叠交替 ReDoS
+    re.compile(r"\\[1-9]"),  # 反向引用
+    re.compile(r"\(\?([=!<]|P=)"),  # lookaround / 命名反引
 )
 _REGEX_META_CHARS = set(r".^$*+?{}[]\()")
 
