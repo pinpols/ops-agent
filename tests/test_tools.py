@@ -50,6 +50,15 @@ class ReadLogsTest(unittest.TestCase):
         self.assertIn("过于复杂", tools.read_logs("console", pattern="(a+)+$"))
         self.assertIn("pattern 过长", tools.read_logs("console", pattern="x" * 129))
 
+    def test_prod_pattern_is_literal_or_only(self):
+        os.environ["OPS_PROFILE"] = "prod"
+        with patch("os.access", return_value=False):
+            ok = tools.read_logs_result("console", pattern="WARN|ERROR")
+            bad = tools.read_logs_result("console", pattern="WARN.*ERROR")
+        self.assertTrue(ok.ok)
+        self.assertFalse(bad.ok)
+        self.assertIn("禁止自由正则", bad.to_text())
+
     def test_rejects_invalid_max_lines(self):
         self.assertIn("必须大于 0", tools.read_logs("console", max_lines=0))
         self.assertIn("必须大于 0", tools.read_logs("console", max_lines=-1))
@@ -78,6 +87,43 @@ class ReadLogsTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.metadata["scanned_files"], tools._LOG_FILE_CAP)
         self.assertTrue(result.metadata["truncated"])
+
+    def test_iter_log_files_bounded_stops_at_cap(self):
+        class FakeEntry:
+            def __init__(self, name):
+                self.name = name
+                self.path = f"/logs/{name}"
+
+            def is_file(self, follow_symlinks=False):
+                return True
+
+        class FakeScandir:
+            def __init__(self):
+                self.seen = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                for i in range(1000):
+                    self.seen += 1
+                    yield FakeEntry(f"console-{i}.log")
+
+        fake = FakeScandir()
+        with (
+            patch("os.scandir", return_value=fake),
+            patch.object(Path, "resolve", lambda self: self),
+            patch.object(Path, "is_relative_to", return_value=True),
+        ):
+            matches, truncated = tools.iter_log_files_bounded(
+                Path("/logs"), name_contains="console"
+            )
+        self.assertEqual(len(matches), tools._LOG_FILE_CAP)
+        self.assertTrue(truncated)
+        self.assertEqual(fake.seen, tools._LOG_FILE_CAP + 1)
 
 
 class QueryPgSafetyTest(unittest.TestCase):

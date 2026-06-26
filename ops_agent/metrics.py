@@ -68,7 +68,8 @@ class Metrics:
                 h = {"buckets": bkts, "counts": [0.0] * len(bkts), "sum": 0.0, "count": 0.0}
                 self._histograms[key] = h
             counts = h["counts"]
-            assert isinstance(counts, list)
+            if not isinstance(counts, list):
+                raise TypeError("histogram counts must be a list")
             for i, b in enumerate(bkts):
                 if value <= b:
                     counts[i] += 1.0
@@ -100,7 +101,8 @@ class Metrics:
                 seen.add(metric)
             buckets = h["buckets"]
             counts = h["counts"]
-            assert isinstance(buckets, tuple) and isinstance(counts, list)
+            if not isinstance(buckets, tuple) or not isinstance(counts, list):
+                raise TypeError("histogram state is malformed")
             for le, c in zip(buckets, counts, strict=True):
                 lines.append(f"{metric}_bucket{_fmt_labels(labels, ('le', str(le)))} {c}")
             lines.append(f"{metric}_bucket{_fmt_labels(labels, ('le', '+Inf'))} {h['count']}")

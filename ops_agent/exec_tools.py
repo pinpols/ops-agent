@@ -6,7 +6,7 @@
 
 import os
 import shlex
-import subprocess
+import subprocess  # nosec B404
 
 from ops_agent.config import get_settings
 from ops_agent.tool_result import ToolResult
@@ -80,7 +80,9 @@ def restart_service_result(service: str) -> ToolResult:
             allowlist=settings.ops_exec_allowlist,
         )
     try:
-        out = subprocess.run(cmd_args, capture_output=True, text=True, timeout=60)
+        out = subprocess.run(  # nosec B603
+            cmd_args, capture_output=True, text=True, timeout=60
+        )
         content = (
             f"[restart_service] 执行 `{cmd}` rc={out.returncode}\n"
             f"{out.stdout[-500:]}{out.stderr[-300:]}"

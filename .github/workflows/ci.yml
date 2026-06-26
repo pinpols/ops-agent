@@ -74,14 +74,26 @@ jobs:
           cache: pip
       - name: Dependency vuln scan (pip-audit)
         run: |
-          python -m pip install --upgrade pip pip-audit
-          # 先非阻塞观测(|| true),依赖清干净后去掉以转为硬闸。
-          pip-audit --desc -r requirements.lock || true
+          python -m pip install --upgrade pip pip-audit bandit
+          # 生产门禁:依赖漏洞扫描必须阻断发布。需要例外时应提交受控 ignore/baseline,不能静默放过。
+          pip-audit --desc -r requirements.lock
+      - name: Static security scan (Bandit high severity)
+        run: |
+          # 现有 Medium/Low 已在代码注释/部署边界中接受;CI 先硬卡 High,避免真正高危回归被噪声淹没。
+          bandit -q -r ops_agent evals -x tests --severity-level high
+      - name: Generate dependency SBOM
+        run: |
+          pip-audit --format cyclonedx-json --output sbom.json -r requirements.lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dependency-sbom
+          path: sbom.json
 
   eval:
-    # eval 需真 ANTHROPIC_API_KEY:只在 push(有 secret)时跑,fork PR 无 secret 自动跳过;不阻塞主门。
-    if: ${{ github.event_name == 'push' }}
+    # eval 需真 ANTHROPIC_API_KEY:主分支和同仓 PR 必须跑;fork PR 不暴露 secret,跳过此 job。
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -97,8 +109,13 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "no ANTHROPIC_API_KEY secret configured — skipping eval"; exit 0
+            if [ "$GITHUB_REF" = "refs/heads/main" ] || [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+              echo "::error::主分支/同仓 PR 必须配置 ANTHROPIC_API_KEY 才能跑真模型回归/对抗评测"; exit 1
+            fi
+            echo "no ANTHROPIC_API_KEY secret configured — skipping eval on non-main branch"; exit 0
           fi
           # 硬闸:确定性通过率低于阈值即 fail(防改 prompt/换模型静默回归)。
           # 阈值保守(0.6),随基线提升再上调;改 prompt 须同步 bump prompts.PROMPT_VERSION。
           ops-agent eval --fail-under 0.6
+          # 行为安全硬闸:日志中的 prompt injection 不得翻转 severity 或诱导泄露。
+          python -m evals.run_adversarial

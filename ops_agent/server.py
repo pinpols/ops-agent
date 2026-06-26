@@ -16,13 +16,16 @@ import hmac
 import ipaddress
 import json
 import logging
+import os
 import re
 import signal
 import socket
+import ssl
 import uuid
+from base64 import b64encode
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 from ops_agent import __version__
 from ops_agent.budget import BudgetExceeded
@@ -89,7 +92,8 @@ def handle_diagnose(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     question, target, error = _validate_question_target(payload)
     if error:
         return 400, error
-    assert question is not None
+    if question is None:
+        return 400, {"error": "缺 question(非空字符串)"}
     trace_id = _payload_trace_id(payload)
     # 延迟 import:避免 server 模块 import 期就拉起 LLM 依赖链(健康探针应轻)。
     from ops_agent.agent import run_agent
@@ -121,7 +125,7 @@ def diagnosis_job_handler(job: Any) -> dict[str, Any]:
         diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
     except Exception as exc:
         # 失败也回调:否则配了 OPS_CALLBACK_URL 的下游永远等不到结果、不知任务已失败/进 DLQ。
-        _post_callback(job, status="failed", error=f"{type(exc).__name__}: {exc}")
+        _post_callback(job, status="failed", error=_callback_error(exc))
         raise
     result = {"trace_id": job.trace_id, "diagnosis": diagnosis.model_dump(mode="json")}
     _post_callback(job, status="succeeded", result=result)
@@ -148,7 +152,8 @@ def _post_callback(
                 reason,
             )
         return
-    assert url is not None
+    if url is None:
+        return
     import urllib.request
 
     body = json.dumps(
@@ -160,15 +165,25 @@ def _post_callback(
             "error": error,
         }
     ).encode("utf-8")
-    req = urllib.request.Request(  # noqa: S310
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
-    )
     try:
-        urllib.request.urlopen(req, timeout=10).close()  # noqa: S310
+        if settings.production:
+            _post_https_callback_pinned(url, body)
+        else:
+            req = urllib.request.Request(  # noqa: S310
+                url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+            )
+            urllib.request.urlopen(req, timeout=10).close()  # noqa: S310  # nosec B310
     except Exception as exc:  # noqa: BLE001 - 回调是 best-effort,失败不该影响诊断结果
         logger.warning(
             "回调投递失败 job_id=%s trace_id=%s url=%s: %s", job.id, job.trace_id, url, exc
         )
+
+
+def _callback_error(exc: Exception) -> str:
+    settings = get_settings()
+    if settings.production:
+        return f"{type(exc).__name__}: callback_error"
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _callback_url_allowed(url: str | None, settings: Settings) -> tuple[bool, str]:
@@ -191,22 +206,24 @@ def _callback_url_allowed(url: str | None, settings: Settings) -> tuple[bool, st
     return True, "ok"
 
 
-def _callback_host_is_public(host: str, port: int | None = None) -> tuple[bool, str]:
+def _resolve_callback_public_addresses(
+    host: str, port: int | None = None
+) -> tuple[list[ipaddress.IPv4Address | ipaddress.IPv6Address], str]:
     try:
         addresses = [ipaddress.ip_address(host.strip("[]"))]
     except ValueError:
         try:
             infos = socket.getaddrinfo(host, port or 443, type=socket.SOCK_STREAM)
         except socket.gaierror:
-            return False, "callback_host_dns_failed"
+            return [], "callback_host_dns_failed"
         addresses = []
         for info in infos:
             try:
                 addresses.append(ipaddress.ip_address(info[4][0]))
             except ValueError:
-                return False, "callback_host_unparseable_address"
+                return [], "callback_host_unparseable_address"
     if not addresses:
-        return False, "callback_host_no_addresses"
+        return [], "callback_host_no_addresses"
     for address in addresses:
         if (
             address.is_private
@@ -216,8 +233,135 @@ def _callback_host_is_public(host: str, port: int | None = None) -> tuple[bool, 
             or address.is_reserved
             or address.is_unspecified
         ):
-            return False, "callback_host_resolves_to_non_public_ip"
-    return True, "ok"
+            return [], "callback_host_resolves_to_non_public_ip"
+    return sorted(set(addresses), key=str), "ok"
+
+
+def _callback_host_is_public(host: str, port: int | None = None) -> tuple[bool, str]:
+    addresses, reason = _resolve_callback_public_addresses(host, port)
+    return bool(addresses), reason
+
+
+def _post_https_callback_pinned(url: str, body: bytes, *, timeout: float = 10) -> None:
+    """POST HTTPS callback after resolving once, then connecting to that vetted IP.
+
+    urllib validates the URL and then resolves again inside urlopen. In production callbacks this
+    keeps DNS rebinding from swapping a previously public host to an internal address between
+    policy check and connect. TLS still validates against the original hostname via SNI.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("prod callback must be https with hostname")
+    host = parsed.hostname.lower()
+    port = parsed.port or 443
+    addresses, reason = _resolve_callback_public_addresses(host, port)
+    if not addresses:
+        raise ValueError(reason)
+
+    request = _build_callback_http_request(parsed, body)
+
+    context = ssl.create_default_context()
+    last_error: Exception | None = None
+    for address in addresses:
+        try:
+            with (
+                _open_callback_tcp_stream(address, host, port, timeout=timeout) as raw,
+                context.wrap_socket(raw, server_hostname=host) as sock,
+            ):
+                sock.settimeout(timeout)
+                sock.sendall(request)
+                with sock.makefile("rb") as response:
+                    status_line = response.readline(512).decode("iso-8859-1", errors="replace")
+                parts = status_line.split()
+                if len(parts) < 2 or not parts[1].isdigit():
+                    raise RuntimeError("invalid callback response")
+                status = int(parts[1])
+                if status < 200 or status >= 300:
+                    raise RuntimeError(f"callback http status {status}")
+                return
+        except Exception as exc:  # noqa: BLE001 - try next resolved public address
+            last_error = exc
+    if last_error:
+        raise last_error
+
+
+def _build_callback_http_request(parsed: Any, body: bytes) -> bytes:
+    host = parsed.hostname.lower()
+    port = parsed.port or 443
+    path = urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
+    request = (
+        f"POST {path} HTTP/1.1\r\n"
+        f"Host: {_host_header(host, port)}\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("ascii") + body
+    return request
+
+
+def _host_header(host: str, port: int) -> str:
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        base = host
+    else:
+        base = f"[{address}]" if address.version == 6 else str(address)
+    return base if port == 443 else f"{base}:{port}"
+
+
+def _proxy_from_env() -> tuple[str, int, str | None] | None:
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if not proxy_url:
+        return None
+    parsed = urlparse(proxy_url)
+    if parsed.scheme != "http" or not parsed.hostname:
+        raise ValueError("HTTPS_PROXY 仅支持 http://host:port CONNECT 代理")
+    auth = None
+    if parsed.username:
+        username = unquote(parsed.username)
+        password = unquote(parsed.password or "")
+        token = b64encode(f"{username}:{password}".encode()).decode("ascii")
+        auth = f"Proxy-Authorization: Basic {token}\r\n"
+    return parsed.hostname, parsed.port or 8080, auth
+
+
+def _open_callback_tcp_stream(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+):
+    proxy = _proxy_from_env()
+    if proxy is None:
+        return socket.create_connection((str(address), port), timeout=timeout)
+
+    proxy_host, proxy_port, proxy_auth = proxy
+    sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
+    sock.settimeout(timeout)
+    target = _host_header(str(address), port)
+    auth_header = proxy_auth or ""
+    connect = (
+        f"CONNECT {target} HTTP/1.1\r\n"
+        f"Host: {target}\r\n"
+        f"{auth_header}"
+        "Proxy-Connection: Keep-Alive\r\n"
+        "\r\n"
+    ).encode("ascii")
+    try:
+        sock.sendall(connect)
+        with sock.makefile("rb") as response:
+            status_line = response.readline(512).decode("iso-8859-1", errors="replace")
+            while response.readline(512).strip():
+                pass
+        parts = status_line.split()
+        if len(parts) < 2 or parts[1] != "200":
+            raise RuntimeError("callback proxy CONNECT failed")
+        return sock
+    except Exception:
+        sock.close()
+        raise
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -325,7 +469,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(400, error)
                 return
             trace_id = _payload_trace_id(payload)
-            assert question is not None
+            if question is None:
+                self._send(400, {"error": "缺 question(非空字符串)"})
+                return
             job = jq.submit(question, target, trace_id=trace_id)
             if job is None:
                 METRICS.inc("webhook_queue_full_total")
@@ -338,7 +484,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(status, body)
 
 
-def serve(host: str = "0.0.0.0", port: int = 8080) -> None:  # noqa: S104 - 容器内监听 0.0.0.0
+def serve(
+    host: str = "0.0.0.0",
+    port: int = 8080,  # noqa: S104  # nosec B104
+) -> None:
     """启动阻塞式 HTTP 服务,SIGINT / SIGTERM 均优雅退出(容器 docker stop / k8s 驱逐发 SIGTERM)。"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = get_settings()

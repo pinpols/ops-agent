@@ -1,12 +1,19 @@
 """System-aware read-only tools for the target batch system."""
 
+import fnmatch
+import os
 import re
 from collections import deque
 from pathlib import Path
 
 from ops_agent.config import get_settings
 from ops_agent.tool_result import ToolResult
-from ops_agent.tools import _LOG_FILE_CAP, _LOG_SCAN_BYTES, _coerce_positive_limit, _iter_tail_lines
+from ops_agent.tools import (
+    _LOG_SCAN_BYTES,
+    _coerce_positive_limit,
+    _iter_tail_lines,
+    iter_log_files_bounded,
+)
 
 # 服务名白名单:只允许小写字母/数字/连字符,挡掉路径穿越(.. / / / 空字节)。
 # 否则模型(或被注入的日志/配置内容)可诱导 read_app_config 读 OPS_TARGET_ROOT 外的任意文件。
@@ -14,6 +21,24 @@ _SERVICE_RE = re.compile(r"^[a-z0-9-]+$")
 
 _ERROR_PATTERNS = ("ERROR", "WARN", "Exception", "timeout", "refused", "No space", "Lock")
 _CONFIG_GLOBS = ("application*.yml", "application*.yaml", "application*.properties")
+_COMPOSE_FILE_CAP = 10
+_COMPOSE_SCAN_BYTES = 512 * 1024
+_CONFIG_FILE_CAP = 50
+_CONFIG_SCAN_BYTES = 256 * 1024
+_CONFIG_DIR_CAP = 500
+_CONFIG_SKIP_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".idea",
+    ".venv",
+    "venv",
+    "node_modules",
+    "target",
+    "build",
+    "dist",
+    "__pycache__",
+}
 
 _MODULE_SERVICE_MAP = {
     "batch-console-api": "console",
@@ -42,6 +67,41 @@ def _service_to_module(service: str) -> str:
     return f"batch-{service}"
 
 
+def _read_bounded_lines(path: Path, *, max_bytes: int) -> tuple[list[str], bool]:
+    with path.open("rb") as f:
+        data = f.read(max_bytes + 1)
+    truncated = len(data) > max_bytes
+    if truncated:
+        data = data[:max_bytes]
+    return data.decode("utf-8", errors="replace").splitlines(), truncated
+
+
+def _find_config_files_bounded(search_roots: list[Path]) -> tuple[list[Path], bool, int]:
+    files: list[Path] = []
+    scanned_dirs = 0
+    truncated = False
+    for base in search_roots:
+        if not base.exists():
+            continue
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            scanned_dirs += 1
+            if scanned_dirs > _CONFIG_DIR_CAP:
+                truncated = True
+                break
+            dirnames[:] = sorted(d for d in dirnames if d not in _CONFIG_SKIP_DIRS)
+            for filename in sorted(filenames):
+                if any(fnmatch.fnmatch(filename, pattern) for pattern in _CONFIG_GLOBS):
+                    files.append(Path(dirpath) / filename)
+                    if len(files) >= _CONFIG_FILE_CAP:
+                        truncated = True
+                        break
+            if truncated:
+                break
+        if truncated:
+            break
+    return files, truncated, scanned_dirs
+
+
 def list_services_result() -> ToolResult:
     """List services inferred from target modules and log files."""
     settings = get_settings()
@@ -54,8 +114,10 @@ def list_services_result() -> ToolResult:
             if module_dir.exists():
                 services.setdefault(service, {})["module"] = str(module_dir)
 
+    log_files_truncated = False
     if settings.ops_log_dir.exists():
-        for path in sorted(settings.ops_log_dir.glob("*.log")):
+        log_files, log_files_truncated = iter_log_files_bounded(settings.ops_log_dir)
+        for path in log_files:
             if path.stat().st_size == 0:
                 continue
             name = path.stem
@@ -87,6 +149,7 @@ def list_services_result() -> ToolResult:
         extra_logs=extra_logs,
         count=len(services),
         log_dir=str(settings.ops_log_dir),
+        log_files_truncated=log_files_truncated,
         target_root=str(settings.ops_target_root) if settings.ops_target_root else None,
     )
 
@@ -109,13 +172,12 @@ def tail_recent_errors_result(max_lines: int = 200) -> ToolResult:
             f"[tail_recent_errors] 日志目录不存在:{log_dir}", log_dir=str(log_dir)
         )
 
-    log_files = sorted(log_dir.glob("*.log"))
+    log_files, truncated_files = iter_log_files_bounded(log_dir)
     hits: deque[str] = deque(maxlen=limit)
     matched_lines = 0
     scanned_files = 0
     scanned_bytes = 0
-    truncated_files = len(log_files) > _LOG_FILE_CAP
-    for path in log_files[:_LOG_FILE_CAP]:
+    for path in log_files:
         scanned_files += 1
         try:
             scanned_bytes += min(path.stat().st_size, _LOG_SCAN_BYTES)
@@ -130,6 +192,8 @@ def tail_recent_errors_result(max_lines: int = 200) -> ToolResult:
         return ToolResult.failure(
             f"[tail_recent_errors] {log_dir} 未命中 WARN/ERROR/Exception 等关键行",
             log_dir=str(log_dir),
+            scanned_files=scanned_files,
+            truncated_files=truncated_files,
         )
 
     tail = list(hits)
@@ -166,6 +230,8 @@ def inspect_compose_result(max_chars: int = 6000) -> ToolResult:
     files = sorted(root.glob("docker-compose*.yml")) + sorted(root.glob("docker-compose*.yaml"))
     if not files:
         return ToolResult.failure(f"[inspect_compose] {root} 下未找到 docker-compose*.yml")
+    truncated_files = len(files) > _COMPOSE_FILE_CAP
+    files = files[:_COMPOSE_FILE_CAP]
 
     interesting = (
         "services:",
@@ -178,22 +244,27 @@ def inspect_compose_result(max_chars: int = 6000) -> ToolResult:
         "valkey",
     )
     chunks: list[str] = []
+    truncated_inputs: list[str] = []
     for path in files:
         lines = []
-        for idx, line in enumerate(
-            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
-        ):
+        raw_lines, input_truncated = _read_bounded_lines(path, max_bytes=_COMPOSE_SCAN_BYTES)
+        if input_truncated:
+            truncated_inputs.append(str(path))
+        for idx, line in enumerate(raw_lines, 1):
             if any(token in line.lower() for token in interesting):
                 lines.append(f"{idx}: {line}")
         if lines:
             chunks.append(f"## {path.name}\n" + "\n".join(lines))
 
     content = "[inspect_compose] compose 摘要\n" + "\n\n".join(chunks)
-    truncated = len(content) > limit
+    truncated = len(content) > limit or truncated_files or bool(truncated_inputs)
     return ToolResult.success(
         content[:limit],
         target_root=str(root),
         files=[str(p) for p in files],
+        scanned_bytes_cap=_COMPOSE_SCAN_BYTES,
+        truncated_files=truncated_files,
+        truncated_inputs=truncated_inputs,
         truncated=truncated,
     )
 
@@ -219,11 +290,7 @@ def read_app_config_result(service: str | None = None, max_chars: int = 6000) ->
         )
 
     search_roots = [root / _service_to_module(service)] if service else [root]
-    files: list[Path] = []
-    for base in search_roots:
-        if base.exists():
-            for glob in _CONFIG_GLOBS:
-                files.extend(base.rglob(glob))
+    files, truncated_file_search, scanned_dirs = _find_config_files_bounded(search_roots)
 
     # 纵深防御:即便服务名/glob 出岔,命中文件也必须落在 root 内(防 symlink/穿越外泄)。
     safe_files = []
@@ -236,6 +303,15 @@ def read_app_config_result(service: str | None = None, max_chars: int = 6000) ->
     files = sorted(set(safe_files))
     if not files:
         suffix = f" service={service}" if service else ""
+        if truncated_file_search:
+            return ToolResult.failure(
+                f"[read_app_config] 搜索达到目录上限,未能确认 application 配置是否存在{suffix}",
+                target_root=str(root),
+                service=service,
+                scanned_dirs=scanned_dirs,
+                scanned_dirs_cap=_CONFIG_DIR_CAP,
+                truncated_file_search=True,
+            )
         return ToolResult.failure(f"[read_app_config] 未找到 application 配置{suffix}")
 
     key_tokens = (
@@ -249,20 +325,28 @@ def read_app_config_result(service: str | None = None, max_chars: int = 6000) ->
         "profile",
     )
     chunks: list[str] = []
+    truncated_inputs: list[str] = []
     for path in files:
         rel = path.relative_to(root)
-        raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        raw_lines, input_truncated = _read_bounded_lines(path, max_bytes=_CONFIG_SCAN_BYTES)
+        if input_truncated:
+            truncated_inputs.append(str(rel))
         picked = [line for line in raw_lines if any(token in line.lower() for token in key_tokens)]
         body = "\n".join(picked or raw_lines[:80])
         chunks.append(f"## {rel}\n{body}")
 
     content = "[read_app_config] 应用配置摘要\n" + "\n\n".join(chunks)
-    truncated = len(content) > limit
+    truncated = len(content) > limit or truncated_file_search or bool(truncated_inputs)
     return ToolResult.success(
         content[:limit],
         target_root=str(root),
         service=service,
         files=[str(p) for p in files],
+        scanned_bytes_cap=_CONFIG_SCAN_BYTES,
+        scanned_dirs=scanned_dirs,
+        scanned_dirs_cap=_CONFIG_DIR_CAP,
+        truncated_file_search=truncated_file_search,
+        truncated_inputs=truncated_inputs,
         truncated=truncated,
     )
 

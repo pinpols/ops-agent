@@ -19,6 +19,7 @@ _SERVICE_RE = re.compile(r"^[a-z0-9-]+$")
 _LOG_LINE_CAP = 1000
 _QUERY_ROW_CAP = 200
 _LOG_FILE_CAP = 20
+_LOG_DISCOVERY_CAP = _LOG_FILE_CAP + 1
 _LOG_SCAN_BYTES = 2 * 1024 * 1024
 _MAX_PATTERN_CHARS = 128
 _UNSAFE_REGEX_PATTERNS = (
@@ -26,6 +27,7 @@ _UNSAFE_REGEX_PATTERNS = (
     re.compile(r"\\[1-9]"),
     re.compile(r"\(\?([=!<]|P=)"),
 )
+_REGEX_META_CHARS = set(r".^$*+?{}[]\()")
 
 
 def _coerce_positive_limit(
@@ -50,11 +52,20 @@ def _log_dir() -> Path:
     return get_settings().ops_log_dir
 
 
-def _compile_safe_log_pattern(pattern: str | None) -> tuple[re.Pattern[str] | None, str | None]:
+def _compile_safe_log_pattern(
+    pattern: str | None, *, production: bool = False
+) -> tuple[re.Pattern[str] | None, str | None]:
     if pattern is None:
         return None, None
     if len(pattern) > _MAX_PATTERN_CHARS:
         return None, f"pattern 过长(最多 {_MAX_PATTERN_CHARS} 字符)"
+    if production:
+        parts = [part.strip() for part in pattern.split("|")]
+        if not parts or any(not part for part in parts):
+            return None, "生产 profile 下 pattern 只允许非空字面量或 A|B 字面量 OR"
+        if any(any(ch in _REGEX_META_CHARS for ch in part) for part in parts):
+            return None, "生产 profile 下禁止自由正则,只允许字面量或 A|B 字面量 OR"
+        return re.compile("|".join(re.escape(part) for part in parts)), None
     for unsafe in _UNSAFE_REGEX_PATTERNS:
         if unsafe.search(pattern):
             return None, "pattern 正则过于复杂,疑似可导致 ReDoS"
@@ -74,6 +85,34 @@ def _iter_tail_lines(path: Path, *, max_bytes: int = _LOG_SCAN_BYTES):
             f.readline()  # drop partial first line
         for raw in f:
             yield raw.decode("utf-8", errors="replace").rstrip("\n")
+
+
+def iter_log_files_bounded(
+    base: Path, *, name_contains: str | None = None, cap: int = _LOG_FILE_CAP
+) -> tuple[list[Path], bool]:
+    """Return at most cap log files without sorting/enumerating the whole directory."""
+    matches: list[Path] = []
+    truncated = False
+    try:
+        with os.scandir(base) as entries:
+            for entry in entries:
+                if len(matches) >= cap:
+                    truncated = True
+                    break
+                try:
+                    if not entry.is_file(follow_symlinks=False) or not entry.name.endswith(".log"):
+                        continue
+                    if name_contains and name_contains not in entry.name:
+                        continue
+                    path = Path(entry.path)
+                    if not path.resolve().is_relative_to(base):
+                        continue
+                    matches.append(path)
+                except OSError:
+                    continue
+    except OSError:
+        return [], False
+    return sorted(matches), truncated
 
 
 def read_logs_result(service: str, pattern: str | None = None, max_lines: int = 200) -> ToolResult:
@@ -101,25 +140,25 @@ def read_logs_result(service: str, pattern: str | None = None, max_lines: int = 
             "[read_logs] 生产 profile 要求日志目录只读挂载,当前目录可写,拒绝读取",
             log_dir=str(base),
         )
-    rx, pattern_error = _compile_safe_log_pattern(pattern)
+    rx, pattern_error = _compile_safe_log_pattern(pattern, production=settings.production)
     if pattern_error:
         return ToolResult.failure(f"[read_logs] {pattern_error}", service=service)
 
-    # 只在日志目录内 glob *<service>*.log;resolve 后再确认仍在 base 下(双保险防穿越)
-    matches = sorted(p for p in base.glob(f"*{service}*.log") if p.resolve().is_relative_to(base))
+    # 只在日志目录内有界扫描 *<service>*.log;resolve 后再确认仍在 base 下(双保险防穿越)。
+    matches, truncated_files = iter_log_files_bounded(base, name_contains=service)
     if not matches:
         return ToolResult.failure(
             f"[read_logs] 未找到 service={service} 的日志(目录 {base})",
             service=service,
             log_dir=str(base),
+            truncated_files=truncated_files,
         )
 
     out_lines: deque[str] = deque(maxlen=limit)
     matched_lines = 0
     scanned_files = 0
-    truncated_files = len(matches) > _LOG_FILE_CAP
     scanned_bytes = 0
-    for path in matches[:_LOG_FILE_CAP]:
+    for path in matches:
         scanned_files += 1
         try:
             scanned_bytes += min(path.stat().st_size, _LOG_SCAN_BYTES)
@@ -137,6 +176,7 @@ def read_logs_result(service: str, pattern: str | None = None, max_lines: int = 
             pattern=pattern,
             matched_files=len(matches),
             scanned_files=scanned_files,
+            truncated_files=truncated_files,
         )
 
     # 尾部 max_lines(最新),并标注截断。扫描窗口和文件数有硬上限,避免超大日志拖垮 worker。

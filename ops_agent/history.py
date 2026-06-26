@@ -133,12 +133,16 @@ class DiagnosisStore:
         if since:
             clauses.append("ts >= ?")
             params.append(since.isoformat())
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(max(1, limit))
+        query = "SELECT * FROM diagnosis_run ORDER BY id DESC LIMIT ?"
+        if clauses:
+            query = (
+                "SELECT * FROM diagnosis_run WHERE "  # nosec
+                + " AND ".join(clauses)
+                + " ORDER BY id DESC LIMIT ?"
+            )
         with self._lock:
-            rows = self._conn.execute(
-                f"SELECT * FROM diagnosis_run{where} ORDER BY id DESC LIMIT ?", params
-            ).fetchall()
+            rows = self._conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
     def count(self) -> int:

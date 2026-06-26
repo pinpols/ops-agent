@@ -403,7 +403,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(func=_cmd_doctor)
 
     serve = sub.add_parser("serve", help="启动 HTTP 触发服务(/healthz /metrics /diagnose)")
-    serve.add_argument("--host", default="0.0.0.0", help="监听地址(默认 0.0.0.0)")  # noqa: S104
+    serve.add_argument(
+        "--host",
+        default="0.0.0.0",  # noqa: S104  # nosec
+        help="监听地址(默认 0.0.0.0)",
+    )
     serve.add_argument("--port", type=int, default=8080, help="监听端口(默认 8080)")
     serve.set_defaults(func=_cmd_serve)
 

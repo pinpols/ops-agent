@@ -8,9 +8,9 @@ python -m evals.run_eval --baseline base.json # 与基线对比,显示每条/总
 
 import argparse
 import json
-import subprocess
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -52,14 +52,41 @@ def _case_results(payload: dict[str, Any]) -> EvalResults:
 
 
 def _git_sha() -> str | None:
+    root = Path(__file__).resolve().parents[1]
+    git_dir = root / ".git"
+    if git_dir.is_file():
+        try:
+            raw = git_dir.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        prefix = "gitdir: "
+        if not raw.startswith(prefix):
+            return None
+        git_dir = (root / raw[len(prefix) :]).resolve()
+    head = git_dir / "HEAD"
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except (OSError, subprocess.CalledProcessError):
+        value = head.read_text(encoding="utf-8").strip()
+    except OSError:
         return None
+    if not value.startswith("ref: "):
+        return value[:7] if value else None
+    ref = value[len("ref: ") :]
+    try:
+        sha = (git_dir / ref).read_text(encoding="utf-8").strip()
+        return sha[:7] if sha else None
+    except OSError:
+        pass
+    packed = git_dir / "packed-refs"
+    try:
+        for line in packed.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith(("#", "^")):
+                continue
+            sha, _, packed_ref = line.partition(" ")
+            if packed_ref == ref and sha:
+                return sha[:7]
+    except OSError:
+        return None
+    return None
 
 
 def _metadata(*, use_judge: bool, case_count: int) -> dict[str, Any]:

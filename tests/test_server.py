@@ -1,7 +1,12 @@
 """HTTP 触发层单测:Bearer 鉴权(fail-closed)+ /diagnose 业务(只读、降级)。"""
 
+import ipaddress
 import json
 import os
+import shutil
+import ssl
+import subprocess
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -295,6 +300,194 @@ class CallbackPolicyTest(unittest.TestCase):
         ok, reason = server._callback_url_allowed("https://127.0.0.1/cb", settings)
         self.assertFalse(ok)
         self.assertEqual(reason, "callback_host_resolves_to_non_public_ip")
+
+    def test_prod_callback_uses_pinned_https_sender(self):
+        job = SimpleNamespace(id="job-1", trace_id="trace-prod")
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "OPS_PROFILE": "prod",
+                    "OPS_CALLBACK_URL": "https://1.1.1.1/cb",
+                    "OPS_CALLBACK_ALLOW_HOSTS": "1.1.1.1",
+                },
+                clear=True,
+            ),
+            patch("ops_agent.server._post_https_callback_pinned") as pinned,
+        ):
+            server._post_callback(job, status="succeeded", result={"ok": True})
+        self.assertEqual(pinned.call_count, 1)
+
+    def test_prod_callback_error_is_sanitized(self):
+        with patch.dict("os.environ", {"OPS_PROFILE": "prod"}, clear=True):
+            self.assertEqual(
+                server._callback_error(RuntimeError("dsn=password secret")),
+                "RuntimeError: callback_error",
+            )
+
+    def test_callback_request_formats_ipv6_host_header(self):
+        req = server._build_callback_http_request(
+            server.urlparse("https://[2606:4700:4700::1111]:8443/cb?x=1"),
+            b"{}",
+        )
+        self.assertIn(b"POST /cb?x=1 HTTP/1.1\r\n", req)
+        self.assertIn(b"Host: [2606:4700:4700::1111]:8443\r\n", req)
+
+    def test_callback_proxy_connect_uses_vetted_ip(self):
+        class FakeFile:
+            def __init__(self):
+                self.lines = [b"HTTP/1.1 200 Connection Established\r\n", b"\r\n"]
+
+            def readline(self, _size=-1):
+                return self.lines.pop(0)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+                self.closed = False
+
+            def settimeout(self, _timeout):
+                return None
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+            def makefile(self, _mode):
+                return FakeFile()
+
+            def close(self):
+                self.closed = True
+
+        fake = FakeSocket()
+        with (
+            patch.dict("os.environ", {"HTTPS_PROXY": "http://proxy.local:8080"}, clear=True),
+            patch("socket.create_connection", return_value=fake) as create_connection,
+        ):
+            sock = server._open_callback_tcp_stream(
+                ipaddress.ip_address("1.1.1.1"),
+                "callback.example.com",
+                443,
+                timeout=5,
+            )
+        self.assertIs(sock, fake)
+        self.assertEqual(create_connection.call_args.args[0], ("proxy.local", 8080))
+        self.assertIn(b"CONNECT 1.1.1.1 HTTP/1.1\r\n", fake.sent[0])
+
+    def test_callback_proxy_connect_supports_basic_auth(self):
+        class FakeFile:
+            def __init__(self):
+                self.lines = [b"HTTP/1.1 200 Connection Established\r\n", b"\r\n"]
+
+            def readline(self, _size=-1):
+                return self.lines.pop(0)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+
+            def settimeout(self, _timeout):
+                return None
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+            def makefile(self, _mode):
+                return FakeFile()
+
+            def close(self):
+                return None
+
+        fake = FakeSocket()
+        with (
+            patch.dict(
+                "os.environ", {"HTTPS_PROXY": "http://user:p%40ss@proxy.local:8080"}, clear=True
+            ),
+            patch("socket.create_connection", return_value=fake),
+        ):
+            server._open_callback_tcp_stream(
+                ipaddress.ip_address("1.1.1.1"),
+                "callback.example.com",
+                443,
+                timeout=5,
+            )
+        self.assertIn(b"Proxy-Authorization: Basic dXNlcjpwQHNz\r\n", fake.sent[0])
+
+    def test_pinned_https_callback_round_trip(self):
+        if not shutil.which("openssl"):
+            self.skipTest("openssl not available")
+        received = []
+
+        class CallbackHandler(server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                received.append((self.path, self.headers.get("Host"), self.rfile.read(length)))
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, fmt, *args):
+                return
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cert = os.path.join(tmp, "cert.pem")
+            key = os.path.join(tmp, "key.pem")
+            subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-nodes",
+                    "-days",
+                    "1",
+                    "-subj",
+                    "/CN=callback.test",
+                    "-addext",
+                    "subjectAltName=DNS:callback.test",
+                    "-keyout",
+                    key,
+                    "-out",
+                    cert,
+                ],
+                check=True,
+                capture_output=True,
+            )
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), CallbackHandler)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert, key)
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            port = httpd.server_address[1]
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            client_ctx = ssl.create_default_context(cafile=cert)
+            try:
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    patch(
+                        "ops_agent.server._resolve_callback_public_addresses",
+                        return_value=([ipaddress.ip_address("127.0.0.1")], "ok"),
+                    ),
+                    patch("ops_agent.server.ssl.create_default_context", return_value=client_ctx),
+                ):
+                    server._post_https_callback_pinned(
+                        f"https://callback.test:{port}/cb?x=1", b'{"ok": true}'
+                    )
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+        self.assertEqual(received, [("/cb?x=1", f"callback.test:{port}", b'{"ok": true}')])
 
 
 if __name__ == "__main__":
