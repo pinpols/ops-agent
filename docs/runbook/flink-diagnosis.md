@@ -67,4 +67,8 @@ flink_taskmanager_Status_Flink_Memory_Managed_Used     # RocksDB state backend �
 ## 只读 → 人工的交接
 ops-agent 给到:根因方向 + 证据(REST/指标快照)+ 分级 + `needs_human_review` 信号。**修复动作**(重启 job、调并行度、扩 TM、改 SQL、清 state)由人按本表执行或走审批,不自动跑。
 
+## 实测基线(真模型 + 真 Flink)
+- **诊断质量**:9 条 `flink_*` golden 打真 DeepSeek,确定性 pass rate **8/9 = 89%**(与主 golden 集 ~88% 一致)。唯一未过是 `flink_checkpoint_failures` 的 severity 边界分歧——模型判 WARNING(作业仍 RUNNING)、本集判 CRITICAL(checkpoint 连续失败威胁 exactly-once / 恢复丢进度)。**非误诊/幻觉**,是相邻级别的校准取舍。
+- **工具连真集群**:`query_flink_rest` 对真 Flink JobManager REST 实测(见 PR 描述):`/overview`、`/jobs`、`/jobs/:id` 实打实返回并解析;写路径(savepoints/stop)被白名单拦在出网前。
+
 相关:`evals/cases.py` 的 `flink_*` 回归样本、`deploy/prometheus/ops-agent-alerts.yml`。
