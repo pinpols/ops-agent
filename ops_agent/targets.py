@@ -28,6 +28,7 @@ class Target:
     pg_dsn: str | None = None
     metrics_url: str | None = None
     flink_url: str | None = None  # Flink JobManager REST base(只读诊断,GET-only)
+    kafka_rest_url: str | None = None  # Kafka REST v3 base(只读诊断,GET-only)
 
 
 def _targets_file() -> Path:
@@ -47,8 +48,13 @@ def load_targets() -> dict[str, Target]:
             raise ValueError(f"target {name!r} 缺 log_dir")
         metrics_url = cfg.get("metrics_url")
         flink_url = cfg.get("flink_url")
+        kafka_rest_url = cfg.get("kafka_rest_url")
         # 配置期就拒非 http(s) URL(防 file://、ftp:// 经只读 REST 工具触发 SSRF/本地读)。
-        for label, value in (("metrics_url", metrics_url), ("flink_url", flink_url)):
+        for label, value in (
+            ("metrics_url", metrics_url),
+            ("flink_url", flink_url),
+            ("kafka_rest_url", kafka_rest_url),
+        ):
             if value and not str(value).startswith(("http://", "https://")):
                 raise ValueError(f"target {name!r} 的 {label} 必须是 http(s):{value!r}")
         out[name] = Target(
@@ -58,6 +64,7 @@ def load_targets() -> dict[str, Target]:
             pg_dsn=cfg.get("pg_dsn"),
             metrics_url=metrics_url,
             flink_url=flink_url,
+            kafka_rest_url=kafka_rest_url,
         )
     return out
 
@@ -72,6 +79,7 @@ def _default_target() -> Target:
         pg_dsn=s.ops_pg_dsn,
         metrics_url=os.environ.get("OPS_METRICS_URL"),
         flink_url=os.environ.get("OPS_FLINK_URL"),
+        kafka_rest_url=os.environ.get("OPS_KAFKA_REST_URL"),
     )
 
 
