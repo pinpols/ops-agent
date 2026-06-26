@@ -8,7 +8,7 @@ import os
 import shlex
 import subprocess  # nosec B404
 
-from ops_agent.config import get_settings
+from ops_agent.config import Settings, get_settings
 from ops_agent.tool_result import ToolResult
 
 # 允许操作的服务白名单(模型/被注入内容都越不出这个集合)
@@ -22,6 +22,32 @@ _ALLOWED_SERVICES = {
     "worker-dispatch",
     "worker-atomic",
 }
+
+
+def exec_gate(
+    settings: Settings, *, dry_run_desc: str, tool: str, **meta: object
+) -> ToolResult | None:
+    """写操作执行侧统一闸(审批闸 HITL 在更上层 agent.DANGEROUS_TOOLS):
+
+    - 未开 `OPS_ALLOW_EXEC` → 返回 DRY-RUN 结果(只报"将做什么",不真执行)。
+    - prod profile 未显式 `OPS_PROD_ALLOW_EXEC` → 硬拒(防 dev/CI 的 OPS_ALLOW_EXEC 泄漏继承)。
+    - 放行 → 返回 None(调用方继续真执行)。
+
+    restart_service 与 Flink 写工具共用此闸,避免各自复制 dry-run/prod 双开关逻辑。
+    """
+    if not settings.ops_allow_exec:
+        return ToolResult.success(
+            f"[{tool}] DRY-RUN:{dry_run_desc}(未真执行;设 OPS_ALLOW_EXEC=true 才真跑)",
+            dry_run=True,
+            **meta,
+        )
+    if settings.production and not settings.ops_prod_allow_exec:
+        return ToolResult.failure(
+            f"[{tool}] 拒绝:生产 profile 下执行需显式 OPS_PROD_ALLOW_EXEC=true"
+            "(OPS_ALLOW_EXEC 单独不足以在 prod 放行)",
+            **meta,
+        )
+    return None
 
 
 def _command_allowed(command_args: list[str], allowlist: tuple[str, ...]) -> bool:
@@ -42,21 +68,12 @@ def restart_service_result(service: str) -> ToolResult:
         )
 
     settings = get_settings()
-    if not settings.ops_allow_exec:
-        return ToolResult.success(
-            f"[restart_service] DRY-RUN:将重启 {service}(未真执行;设 OPS_ALLOW_EXEC=true 才真跑)",
-            service=service,
-            dry_run=True,
-        )
-
-    # 生产 fail-closed:即便 OPS_ALLOW_EXEC=true(可能从 dev .env / CI 泄漏继承),
-    # prod profile 下仍必须显式 OPS_PROD_ALLOW_EXEC=true 才真执行,否则硬拒(不退化为 dry-run)。
-    if settings.production and not settings.ops_prod_allow_exec:
-        return ToolResult.failure(
-            f"[restart_service] 拒绝:生产 profile 下执行需显式 OPS_PROD_ALLOW_EXEC=true "
-            f"(OPS_ALLOW_EXEC 单独不足以在 prod 放行 {service})",
-            service=service,
-        )
+    # 执行侧默认安全闸(dry-run / prod 双开关),与 Flink 写工具共用。
+    gate = exec_gate(
+        settings, dry_run_desc=f"将重启 {service}", tool="restart_service", service=service
+    )
+    if gate is not None:
+        return gate
 
     cmd_tpl = settings.ops_restart_cmd
     if not cmd_tpl:

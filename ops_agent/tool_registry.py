@@ -12,6 +12,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from ops_agent.exec_tools import RESTART_TOOL, restart_service_result
+from ops_agent.flink_exec_tools import (
+    FLINK_CANCEL_TOOL,
+    FLINK_SAVEPOINT_TOOL,
+    flink_cancel_job_result,
+    flink_trigger_savepoint_result,
+)
 from ops_agent.flink_tools import QUERY_FLINK_TOOL, query_flink_rest_result
 from ops_agent.kafka_tools import QUERY_KAFKA_TOOL, query_kafka_rest_result
 from ops_agent.metrics_tools import QUERY_METRICS_TOOL, query_metrics_result
@@ -62,6 +68,8 @@ REGISTRY: list[Tool] = [
     Tool(QUERY_FLINK_TOOL, query_flink_rest_result),
     Tool(QUERY_KAFKA_TOOL, query_kafka_rest_result),
     Tool(RESTART_TOOL, restart_service_result, dangerous=True),
+    Tool(FLINK_CANCEL_TOOL, flink_cancel_job_result, dangerous=True),
+    Tool(FLINK_SAVEPOINT_TOOL, flink_trigger_savepoint_result, dangerous=True),
 ]
 
 # 三个派生视图(agent 只依赖这三个,不再各处手工拼装):

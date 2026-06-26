@@ -4,6 +4,7 @@ import unittest
 
 from ops_agent import tool_registry as tr
 from ops_agent.exec_tools import EXEC_TOOL_RESULT_IMPLS
+from ops_agent.flink_exec_tools import FLINK_EXEC_TOOL_RESULT_IMPLS
 from ops_agent.flink_tools import QUERY_FLINK_TOOL_RESULT_IMPLS
 from ops_agent.kafka_tools import QUERY_KAFKA_TOOL_RESULT_IMPLS
 from ops_agent.metrics_tools import QUERY_METRICS_TOOL_RESULT_IMPLS
@@ -21,6 +22,7 @@ class ToolRegistryTest(unittest.TestCase):
             **QUERY_FLINK_TOOL_RESULT_IMPLS,
             **QUERY_KAFKA_TOOL_RESULT_IMPLS,
             **EXEC_TOOL_RESULT_IMPLS,
+            **FLINK_EXEC_TOOL_RESULT_IMPLS,
         }
         self.assertEqual(tr.RESULT_IMPLS, expected)
 
@@ -46,11 +48,16 @@ class ToolRegistryTest(unittest.TestCase):
                 "query_flink_rest",
                 "query_kafka_rest",
                 "restart_service",
+                "flink_cancel_job",
+                "flink_trigger_savepoint",
             ],
         )
 
     def test_dangerous_is_single_source(self):
-        self.assertEqual(tr.DANGEROUS, frozenset({"restart_service"}))
+        self.assertEqual(
+            tr.DANGEROUS,
+            frozenset({"restart_service", "flink_cancel_job", "flink_trigger_savepoint"}),
+        )
         # exec_tools 不再另立 DANGEROUS_TOOLS(防双源)
         import ops_agent.exec_tools as exec_tools
 
