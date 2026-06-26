@@ -13,9 +13,9 @@ from unittest.mock import MagicMock, patch
 
 from ops_agent import agent, graph_agent, investigate, server
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
-from ops_agent.exec_tools import DANGEROUS_TOOLS
 from ops_agent.models import Diagnosis, Severity
 from ops_agent.prompts import UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fence_untrusted
+from ops_agent.tool_registry import DANGEROUS as DANGEROUS_TOOLS
 from ops_agent.tool_result import ToolResult
 
 

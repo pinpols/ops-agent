@@ -21,27 +21,18 @@ from ops_agent.budget import BudgetExceeded, RunBudget
 from ops_agent.config import Settings, get_settings
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
-from ops_agent.exec_tools import DANGEROUS_TOOLS, EXEC_TOOL_RESULT_IMPLS, RESTART_TOOL
 from ops_agent.llm import make_client
 from ops_agent.metrics import METRICS
-from ops_agent.metrics_tools import QUERY_METRICS_TOOL, QUERY_METRICS_TOOL_RESULT_IMPLS
 from ops_agent.models import Diagnosis
 from ops_agent.obs import observe
 from ops_agent.prompts import AGENT_SYSTEM as _SYSTEM_PROMPT
 from ops_agent.prompts import PROMPT_VERSION, fence_untrusted
 from ops_agent.redaction import redact_text
-from ops_agent.system_tools import SYSTEM_TOOL_RESULT_IMPLS, SYSTEM_TOOLS
+from ops_agent.tool_registry import DANGEROUS as DANGEROUS_TOOLS
+from ops_agent.tool_registry import RESULT_IMPLS as _ALL_IMPLS
+from ops_agent.tool_registry import SCHEMAS as _TOOL_SCHEMAS
 from ops_agent.tool_result import ToolResult
-from ops_agent.tools import QUERY_PG_TEMPLATE_TOOL, QUERY_PG_TOOL, READ_LOGS_TOOL, TOOL_RESULT_IMPLS
 from ops_agent.trace_io import write_agent_trace
-
-# 所有工具实现的派发表(只读 + 执行 + 指标)
-_ALL_IMPLS = {
-    **SYSTEM_TOOL_RESULT_IMPLS,
-    **TOOL_RESULT_IMPLS,
-    **QUERY_METRICS_TOOL_RESULT_IMPLS,
-    **EXEC_TOOL_RESULT_IMPLS,
-}
 
 
 @dataclass(frozen=True)
@@ -169,15 +160,7 @@ def run_agent(
     # 在最后一个稳定工具上打 ephemeral 缓存断点:tools→system 这段固定前缀在多步循环里
     # 跨轮重发,命中缓存可大幅省输入 token(工具列表确定且有序,前缀稳定)。
     report_tool = {**build_report_tool(), "cache_control": {"type": "ephemeral"}}
-    tools = [
-        *SYSTEM_TOOLS,
-        READ_LOGS_TOOL,
-        QUERY_METRICS_TOOL,
-        QUERY_PG_TEMPLATE_TOOL,
-        QUERY_PG_TOOL,
-        RESTART_TOOL,
-        report_tool,
-    ]
+    tools = [*_TOOL_SCHEMAS, report_tool]  # 静态工具集来自单一注册表;report 动态追加(带缓存断点)
 
     messages: list[dict] = list(history or [])
     messages.append({"role": "user", "content": question})
