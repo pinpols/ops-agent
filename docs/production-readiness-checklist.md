@@ -14,7 +14,8 @@
 - ✅ webhook Bearer token 鉴权(`OPS_WEBHOOK_TOKEN`,常量时间比较,**未配即 fail-closed**)
 - ✅ 密钥文件注入 `<NAME>_FILE`(docker/k8s secret,密钥不进环境变量/进程表)
 - ✅ 只读 DB 最小权限校验(`doctor` 拒 postgres/root/admin 用户)
-- ◑ 审批人身份:审计已留痕批/执行,actor 身份待接入 SSO(T2)
+- ✅ 审批/执行 actor:审计记录包含 actor;HTTP 触发层支持 `X-Ops-Actor`,worker job 跨队列保留 actor
+- ◑ 企业身份源:actor 当前来自受信入口 header/env,SSO/OIDC 仍待接(T2)
 - ☐ 调用方 SSO/OIDC(T2 多团队自服务时)
 
 ## 3. 数据源广度与多目标
@@ -49,11 +50,13 @@
 - ✅ 单次诊断 trace(JSONL)+ 证据 bundle(既有)+ 可选 Langfuse(既有)
 - ✅ 告警规则示例(`deploy/prometheus/ops-agent-alerts.yml`:积压/背压丢单/DLQ/失败率/停摆/P95)
   + 运维 runbook(`docs/runbook/queue-operations.md`)—— **规则需接入真 Prometheus 验证触发**
-- ◑ trace/审计保留:审计按大小滚动;集中/不可篡改存储待接(T2)
+- ◑ trace/审计保留:审计按大小多档滚动 + `.lock` 跨进程文件锁 + hash chain;
+  集中/不可篡改存储待接(T2)
 
 ## 7. 安全合规
 - ✅ 出网内容统一脱敏(token/DSN/JWT/邮箱/手机号) + `OPS_REDACTION_RULES_FILE` 外部规则扩展
-- ✅ 审计留存滚动(`OPS_AUDIT_MAX_BYTES`) + 本地 hash chain(`prev_hash/hash`)防静默篡改
+- ✅ 审计留存滚动(`OPS_AUDIT_MAX_BYTES`/`OPS_AUDIT_ROTATE_KEEP`) + 本地 hash chain(`prev_hash/hash`)防静默篡改
+- ✅ 供应链基线:CI actions 固定到 commit SHA;Docker base image 固定 digest;K8s 默认清单禁止 `latest`
 - ✅ webhook body 上限 + 非法 JSON/超大 payload 拒绝
 - ☐ 出网 egress allowlist、PII 超脱敏正则的合规处理(T2/合规要求驱动)
 
@@ -67,7 +70,7 @@
 - ☐ 企业级中心化存储(PG/对象存储)+ 数据驻留/导出合规:SQLite 是单机基线,跨实例聚合是 T2 后续
 
 ## 9. 测试深度
-- ✅ 234 测试 / 覆盖 80.7%(coverage gate 70%);新模块均带单测 + serve 端到端起真 HTTP
+- ✅ 258+ 测试 / coverage gate 70%;新模块均带单测 + serve 端到端起真 HTTP
 - ✅ 故障注入(队列满/Redis 断/worker 崩/callback 超时)+ 基础负载脚本(`scripts/loadtest.py`)
 - ◑ LLM 边界模块(graph/investigate)仍偏薄;故障注入用 fake,**真集群混沌/负载实测待 staging**
 
@@ -84,11 +87,11 @@
 3. 配 `OPS_REDACTION_RULES_FILE` 覆盖业务自定义敏感字段(工单号、租户号、内部员工号等)
 4. 配 `targets.toml`(只读 pg_dsn + metrics_url),`OPS_METRICS_FILE` 指向可写卷
 5. 镜像跑起后 `/healthz` 200、`/metrics` 有计数
-6. CI 绿(lint/format/mypy/测试 70% 闸/eval `--fail-under`)
+6. CI 绿(lint/format/mypy/测试 70% 闸/离线 eval 闸/安全扫描/SBOM)
 
 ## 上线判定(go / no-go)
 
-**结论:可上「受控只读试生产」(内部、人工复核输出、单租户、auth 后);不可上「无人值守 / 关键告警闭环 / 多团队多租户开放」。** 区别不在测试数量,而在真实环境证据链。
+**结论:可上「受控只读试生产」(内部、人工复核输出、单租户、auth 后);不可上「无人值守 / 关键告警闭环 / 多团队多租户开放」。** 区别不在测试数量,而在真实环境证据链与企业身份/集中审计。
 
 ### 本地已验证(有据,2026-06-25)
 - 控制面:队列原子背压、重试/DLQ、停机不丢单、四类故障注入(队列满/Redis 断/worker 崩/callback 超时)绿。

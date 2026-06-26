@@ -25,13 +25,14 @@ def _rq(max_queue: int = 100, max_retries: int = 2) -> RedisQueue:
 class RedisQueueTest(unittest.TestCase):
     def test_submit_stores_and_enqueues(self):
         rq = _rq()
-        job = rq.submit("why slow", target="fbs", trace_id="trace-redis")
+        job = rq.submit("why slow", target="fbs", trace_id="trace-redis", actor="alice")
         self.assertIsNotNone(job)
         self.assertEqual(rq.qsize(), 1)
         loaded = rq.get(job.id)
         self.assertEqual(loaded.question, "why slow")
         self.assertEqual(loaded.trace_id, "trace-redis")
         self.assertEqual(loaded.target, "fbs")
+        self.assertEqual(loaded.actor, "alice")
         self.assertEqual(loaded.status, QUEUED)
 
     def test_backpressure_returns_none_when_full(self):

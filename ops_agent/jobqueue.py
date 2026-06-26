@@ -35,6 +35,7 @@ class DiagnosisJob:
     question: str
     trace_id: str
     target: str | None = None
+    actor: str | None = None
     status: str = QUEUED
     result: dict | None = None
     error: str | None = None
@@ -48,6 +49,7 @@ class DiagnosisJob:
             "trace_id": self.trace_id,
             "status": self.status,
             "target": self.target,
+            "actor": self.actor,
             "created_at": self.created_at,
             "attempts": self.attempts,
             "result": self.result,
@@ -91,7 +93,11 @@ class JobQueue:
             self._threads.append(t)
 
     def submit(
-        self, question: str, target: str | None = None, trace_id: str | None = None
+        self,
+        question: str,
+        target: str | None = None,
+        trace_id: str | None = None,
+        actor: str | None = None,
     ) -> DiagnosisJob | None:
         """入队一个诊断任务。队列满 → 返回 None(背压,上游应回 429)。"""
         job = DiagnosisJob(
@@ -99,6 +105,7 @@ class JobQueue:
             question=question,
             target=target,
             trace_id=trace_id or uuid.uuid4().hex,
+            actor=actor,
         )
         with self._lock:
             self._jobs[job.id] = job

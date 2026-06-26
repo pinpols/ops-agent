@@ -2,6 +2,18 @@
 
 本项目遵循语义化版本。日期倒序。
 
+## 0.2.1 — 生产硬化维护
+
+### 新增
+- 审计记录加入 `actor`,HTTP 触发层支持 `X-Ops-Actor`,异步 job 跨队列保留 actor。
+- 审计文件增加跨进程 `.lock` 文件锁和 `OPS_AUDIT_ROTATE_KEEP` 多档轮转。
+- 部署测试禁止默认 k8s 清单使用 `latest` 镜像 tag。
+
+### 变更
+- CI action 固定到 commit SHA,Docker base image 固定 digest。
+- k8s 默认镜像从 `latest` 改为版本 tag,生产 overlay 文档改用 image digest。
+- README 从学习项目定位调整为生产化只读运维诊断副驾。
+
 ## 0.2.0 — T1 生产化(只读诊断副驾)
 
 跨 10 个维度把"成熟学习项目"提升到 **T1 生产级只读诊断**。所有新能力默认安全、向后兼容。

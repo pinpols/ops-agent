@@ -38,6 +38,18 @@ def test_kustomization_resources_exist() -> None:
         assert (K8S_DIR / resource).exists(), f"kustomization resource not found: {resource}"
 
 
+def test_k8s_default_images_do_not_use_latest_tag() -> None:
+    for path in sorted(K8S_DIR.glob("*.yaml")):
+        for doc in _load_yaml_documents(path):
+            spec = doc.get("spec", {})
+            template = spec.get("template", {}) if isinstance(spec, dict) else {}
+            pod_spec = template.get("spec", {}) if isinstance(template, dict) else {}
+            containers = pod_spec.get("containers", []) if isinstance(pod_spec, dict) else []
+            for container in containers:
+                image = container.get("image", "")
+                assert not image.endswith(":latest"), f"{path} uses mutable latest image tag"
+
+
 def test_prometheus_alerts_are_parseable_and_actionable() -> None:
     rules_file = PROM_DIR / "ops-agent-alerts.yml"
     alert_config = _load_yaml_documents(rules_file)[0]

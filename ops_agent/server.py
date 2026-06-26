@@ -28,6 +28,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse, urlunparse
 
 from ops_agent import __version__
+from ops_agent.audit import audit_actor
 from ops_agent.budget import BudgetExceeded
 from ops_agent.config import Settings, get_settings
 from ops_agent.metrics import METRICS
@@ -38,6 +39,7 @@ logger = logging.getLogger("ops_agent.server")
 _MAX_BODY_BYTES = 64 * 1024  # webhook body 上限,防超大 payload
 _MAX_QUESTION_CHARS = 8192
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_ACTOR_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,128}$")
 
 
 def _deny_all_approver(tool_name: str, tool_input: dict) -> bool:
@@ -66,6 +68,12 @@ def _payload_trace_id(payload: dict[str, Any]) -> str:
     return uuid.uuid4().hex
 
 
+def _request_actor(value: str | None) -> str:
+    if value and _ACTOR_RE.match(value.strip()):
+        return value.strip()
+    return "webhook"
+
+
 def _validate_question_target(
     payload: dict[str, Any],
 ) -> tuple[str | None, str | None, dict[str, Any] | None]:
@@ -87,7 +95,9 @@ def _validate_question_target(
     return question, target.strip(), None
 
 
-def handle_diagnose(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def handle_diagnose(
+    payload: dict[str, Any], *, actor: str | None = None
+) -> tuple[int, dict[str, Any]]:
     """处理 /diagnose 业务(鉴权之后调用)。返回 (http_status, json_body)。只读、注入全拒审批闸。"""
     question, target, error = _validate_question_target(payload)
     if error:
@@ -101,7 +111,8 @@ def handle_diagnose(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     q = f"[target={target}] {question}" if target else question
     try:
         # include_trace 默认 False → 返回 2-元组;取 [0] 兼容两种返回签名(避免 mypy 解包歧义)。
-        diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=trace_id)[0]
+        with audit_actor(actor):
+            diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=trace_id)[0]
     except BudgetExceeded as e:
         return 503, {"error": "budget_exceeded", "detail": str(e)}
     except Exception:  # noqa: BLE001 - webhook 边界,任何异常转 500 而非崩进程
@@ -122,7 +133,8 @@ def diagnosis_job_handler(job: Any) -> dict[str, Any]:
     q = f"[target={job.target}] {job.question}" if job.target else job.question
     logger.info("开始处理诊断任务 job_id=%s trace_id=%s", job.id, job.trace_id)
     try:
-        diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
+        with audit_actor(getattr(job, "actor", None)):
+            diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
     except Exception as exc:
         # 失败也回调:否则配了 OPS_CALLBACK_URL 的下游永远等不到结果、不知任务已失败/进 DLQ。
         _post_callback(job, status="failed", error=_callback_error(exc))
@@ -461,6 +473,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "body must be a JSON object"})
             return
         METRICS.inc("webhook_diagnose_total")
+        actor = _request_actor(self.headers.get("X-Ops-Actor"))
         # 异步模式:入队 + 立即 202(消掉同步阻塞告警 webhook);队列满 → 429 背压。
         jq = getattr(self.server, "job_queue", None)
         if jq is not None:
@@ -472,7 +485,7 @@ class _Handler(BaseHTTPRequestHandler):
             if question is None:
                 self._send(400, {"error": "缺 question(非空字符串)"})
                 return
-            job = jq.submit(question, target, trace_id=trace_id)
+            job = jq.submit(question, target, trace_id=trace_id, actor=actor)
             if job is None:
                 METRICS.inc("webhook_queue_full_total")
                 self._send(429, {"error": "queue_full", "detail": "稍后重试", "trace_id": trace_id})
@@ -480,7 +493,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(202, {"job_id": job.id, "trace_id": job.trace_id, "status": job.status})
             return
         # 同步模式(默认):内联跑完返回(向后兼容)。
-        status, body = handle_diagnose(payload)
+        status, body = handle_diagnose(payload, actor=actor)
         self._send(status, body)
 
 

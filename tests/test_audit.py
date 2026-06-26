@@ -21,8 +21,12 @@ class AuditTest(unittest.TestCase):
             )
             lines = path.read_text(encoding="utf-8").strip().splitlines()
         self.assertEqual(len(lines), 2)
-        self.assertEqual(json.loads(lines[0])["type"], "approval")
-        self.assertEqual(json.loads(lines[1])["type"], "execution")
+        first = json.loads(lines[0])
+        second = json.loads(lines[1])
+        self.assertEqual(first["type"], "approval")
+        self.assertEqual(second["type"], "execution")
+        self.assertIn("actor", first)
+        self.assertIn("actor", second)
 
     def test_records_include_verifiable_hash_chain(self):
         with TemporaryDirectory() as tmp:
@@ -58,6 +62,7 @@ class AuditTest(unittest.TestCase):
             rotated = path.with_name("audit.jsonl.1")
             self.assertTrue(rotated.exists())
             self.assertEqual(rotated.read_text(encoding="utf-8"), "x" * 100)
+            self.assertTrue(path.with_name("audit.jsonl.lock").exists())
             # 新文件只含本次这一条
             records = [
                 json.loads(line) for line in path.read_text(encoding="utf-8").strip().splitlines()
@@ -81,6 +86,45 @@ class AuditTest(unittest.TestCase):
 
         self.assertEqual(rotated["hash"], first["hash"])
         self.assertEqual(current["prev_hash"], first["hash"])
+
+    def test_rotation_keeps_multiple_archives(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "audit.jsonl"
+            with patch.dict(
+                "os.environ",
+                {"OPS_AUDIT_MAX_BYTES": "1", "OPS_AUDIT_ROTATE_KEEP": "3"},
+                clear=False,
+            ):
+                for index in range(5):
+                    path.write_text(f"oversize-{index}", encoding="utf-8")
+                    append_approval_record(
+                        path, tool_name=f"t{index}", tool_input={}, approved=True
+                    )
+
+            archives = [path.with_name(f"audit.jsonl.{index}") for index in range(1, 4)]
+
+            self.assertTrue(all(archive.exists() for archive in archives))
+            self.assertFalse(path.with_name("audit.jsonl.4").exists())
+
+    def test_actor_can_be_supplied_or_defaulted_from_env(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "audit.jsonl"
+            append_approval_record(
+                path,
+                tool_name="restart_service",
+                tool_input={},
+                approved=False,
+                actor="alice@example.com",
+            )
+            with patch.dict("os.environ", {"OPS_ACTOR": "ci-bot"}, clear=False):
+                append_execution_record(path, tool_name="restart_service", ok=True, dry_run=True)
+
+            records = [
+                json.loads(line) for line in path.read_text(encoding="utf-8").strip().splitlines()
+            ]
+
+        self.assertEqual(records[0]["actor"], "alice@example.com")
+        self.assertEqual(records[1]["actor"], "ci-bot")
 
 
 if __name__ == "__main__":

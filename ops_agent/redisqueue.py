@@ -69,6 +69,7 @@ class RedisQueue:
             "question": job.question,
             "trace_id": job.trace_id,
             "target": job.target or "",
+            "actor": job.actor or "",
             "status": job.status,
             "result": json.dumps(job.result) if job.result is not None else "",
             "error": job.error or "",
@@ -90,6 +91,7 @@ class RedisQueue:
             question=h.get("question", ""),
             trace_id=h.get("trace_id") or job_id,
             target=h.get("target") or None,
+            actor=h.get("actor") or None,
             status=h.get("status", QUEUED),
             result=json.loads(h["result"]) if h.get("result") else None,
             error=h.get("error") or None,
@@ -99,7 +101,11 @@ class RedisQueue:
 
     # ── ingress(serve)────────────────────────────────────────
     def submit(
-        self, question: str, target: str | None = None, trace_id: str | None = None
+        self,
+        question: str,
+        target: str | None = None,
+        trace_id: str | None = None,
+        actor: str | None = None,
     ) -> DiagnosisJob | None:
         """入队。队列长度达上限 → 返回 None(背压)。
 
@@ -111,6 +117,7 @@ class RedisQueue:
             question=question,
             trace_id=trace_id or uuid.uuid4().hex,
             target=target,
+            actor=actor,
         )
         job_key = self._job_key(job.id)
         mapping = self._mapping(job)

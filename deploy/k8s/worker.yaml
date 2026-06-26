@@ -28,7 +28,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: worker
-          image: ghcr.io/pinpols/ops-agent:latest   # 与 ingress 同镜像,不同 args
+          image: ghcr.io/pinpols/ops-agent:0.2.1   # 与 ingress 同镜像,生产 overlay 建议改用 digest
           args: ["serve-worker"]
           envFrom:
             - configMapRef:

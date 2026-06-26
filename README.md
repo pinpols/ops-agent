@@ -1,23 +1,25 @@
-# ops-agent — 运维诊断智能体(学习项目)
+# ops-agent — 生产化只读运维诊断副驾
 
-一个从"基本功 → 单工具 → 多步 agent → 工程化"逐层长起来的学习项目。
-被诊断对象 = 隔壁 `../file-batch-system`(日志 / PG / 指标都现成)。
+ops-agent 是面向内部运维场景的只读诊断服务:接收告警或人工问题后,基于日志、
+只读 SQL、Prometheus 指标和目标系统配置做多步取证,输出结构化诊断、证据 trace 和
+诊断包。默认生产 profile 下禁止自由 SQL、危险动作需 allowlist + 审批,触发层永远注入
+deny-all 审批闸,不让模型自主执行写操作。
 
-> **学习原则**:前期**不用框架**,先用裸 SDK 把 LLM 的输入输出/工具调用机制搞懂,
-> 需要"状态+循环"了再上 LangGraph。每个阶段**只啃一个新东西**,踩实再加下一层。
+当前定位是 **T1/T2 之间的受控只读生产候选**:适合内部、单租户、人工复核的只读诊断;
+不定位为无人值守变更系统或开放多租户 SaaS。
 
-## 分阶段路线图
+## 能力演进
 
-| 阶段 | 只学这一件新事 | 产出 | 引入的依赖 |
+| 阶段 | 核心能力 | 产出 | 引入的依赖 |
 |---|---|---|---|
-| **1 基本功** ✅ | prompt + **结构化输出**(Pydantic 逼模型守 JSON 格式) | 日志 → 结构化诊断,**一次 LLM 调用,无工具** | anthropic + pydantic |
-| **2 单工具** ✅ | **一次 function calling**(LLM 决定调一个工具) | LLM 自己决定调 `query_pg` / `read_logs` 一次 | (同上) |
-| **3 多步 agent** ✅(手写循环)| **多步规划 + 循环**(自己连着调几个工具到结论) | 真 agent | + langgraph |
-| **3b LangGraph** ✅(对照:框架替你做了啥)| port 手写循环→LangGraph(checkpointer 记忆/可续/HITL)| 同左 | + langgraph/langchain-anthropic |
-| **4 工程化** ✅ | **eval**(根因判对没)+ **trace/成本** | 测试集 + 可观测 | + langfuse |
-| **5 执行+HITL** ✅ | 危险动作工具 + **人工审批闸**(白名单/dry-run/批准才执行) | restart_service + approver | exec_tools |
+| **1 结构化诊断** ✅ | prompt + Pydantic schema | 日志 → `Diagnosis` | anthropic + pydantic |
+| **2 只读取证工具** ✅ | function calling | `query_pg_template` / `read_logs` / metrics | psycopg + requests |
+| **3 多步 agent** ✅ | 多步规划 + 循环 + trace | agent 自动取证到结论 | langgraph 可选 |
+| **4 工程化门禁** ✅ | eval / adversarial / CI / coverage | 回归门禁 + 安全扫描 | pytest / ruff / mypy |
+| **5 HITL 安全边界** ✅ | 危险动作 allowlist + 审批审计 | 只读触发层 + 审批记录 | exec_tools |
+| **6 事件驱动运行** ✅ | ingress / queue / worker / DLQ | webhook 秒级 ACK + 后台诊断 | Redis 可选 |
 
-## 起步(阶段 1)
+## 起步
 
 ```bash
 cd ops-agent
@@ -25,15 +27,15 @@ python3.12 -m venv .venv && source .venv/bin/activate   # 需 Python 3.11+
 pip install -e ".[dev,graph]"     # 开发/测试推荐;仅运行核心也可 pip install -r requirements.txt
 cp .env.example .env          # 填入 ANTHROPIC_API_KEY
 
-# 阶段 1:预喂日志 → 结构化诊断
+# 预喂日志 → 结构化诊断
 ops-agent diagnose data/sample-console.log
-# 阶段 2:自然语言问题 → 模型自己调 read_logs 取数据 → 结论
+# 自然语言问题 → agent 调只读工具取证 → 结论
 ops-agent investigate "console 最近有什么异常?"
-# 阶段 3:多步 agent(多工具+循环+记忆),交互式多轮
+# 多步 agent(多工具+循环+记忆),交互式多轮
 ops-agent chat          # 多轮;或:ops-agent chat "sim 跑批为什么慢?"
-# 阶段 3b:同 agent,但用 LangGraph(循环/记忆/结构化都框架代劳)
+# 同 agent 的 LangGraph 版
 ops-agent graph
-# 阶段 4:eval(诊断判对没)+ 可选 Langfuse trace
+# eval(诊断判对没)+ 可选 Langfuse trace
 ops-agent eval            # 确定性打分(需 key 跑诊断)
 ops-agent eval --judge    # + LLM-as-judge
 ops-agent eval --save base.json      # 存基线(改 prompt 后 --baseline base.json 对比升降)
@@ -83,6 +85,8 @@ export OPS_PROFILE=prod
 export OPS_SQL_ALLOW_FREE=false
 export OPS_REDACT_ARTIFACTS=true
 export OPS_APPROVAL_LOG=.ops-agent/approvals.jsonl
+export OPS_AUDIT_ROTATE_KEEP=5
+export OPS_ACTOR=ops-bot
 export OPS_REDACTION_RULES_FILE=/etc/ops-agent/redaction-rules.json
 # 如启用异步回调,prod 下必须 HTTPS + 主机 allowlist
 export OPS_CALLBACK_ALLOW_HOSTS=ops-callback.example.com
@@ -101,9 +105,11 @@ export OPS_CALLBACK_ALLOW_HOSTS=ops-callback.example.com
 - `OPS_EXEC_ALLOWLIST` 命中完整命令或 argv[0]
 - agent 审批闸批准
 
-审批结果会写入 `OPS_APPROVAL_LOG`。trace 和 bundle 默认脱敏,会遮蔽常见 token、
-DSN 密码、邮箱和手机号。`ops-agent doctor` 会检查生产 profile 下的自由 SQL、
-执行 allowlist、PG 用户名、callback 出站策略和日志目录是否可写;生产环境应使用
+审批和执行结果会写入 `OPS_APPROVAL_LOG`,记录 `actor`、`prev_hash/hash` 哈希链,
+并按 `OPS_AUDIT_MAX_BYTES` + `OPS_AUDIT_ROTATE_KEEP` 多档轮转;HTTP 触发层可用
+`X-Ops-Actor` 传入调用主体,本地/worker 默认读取 `OPS_ACTOR`。trace 和 bundle 默认脱敏,
+会遮蔽常见 token、DSN 密码、邮箱和手机号。`ops-agent doctor` 会检查生产 profile 下的
+自由 SQL、执行 allowlist、PG 用户名、callback 出站策略和日志目录是否可写;生产环境应使用
 最小权限只读 DB 用户,并把日志目录以只读方式挂载。
 
 `diagnose.py` 已实现:读日志 → 用 Anthropic function calling 逼模型按 `models.Diagnosis`
@@ -131,7 +137,8 @@ curl -H "Authorization: Bearer $OPS_WEBHOOK_TOKEN" \
 - **预算闸**:`OPS_MAX_RUN_SECONDS` / `OPS_MAX_RUN_TOKENS` 防绕圈烧钱。
 - **密钥**:支持 `<NAME>_FILE`(docker/k8s secret)注入。
 - **Docker**:`docker build -t ops-agent . && docker run -p 8080:8080 --env-file .env ops-agent`
-  (非 root + HEALTHCHECK)。
+  (非 root + HEALTHCHECK;基础镜像按 digest 固定)。
+- **Kubernetes**:默认清单不使用 `latest`;生产 overlay 应使用发布镜像 digest。
 
 ## 模型来源
 

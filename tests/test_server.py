@@ -12,10 +12,12 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from ops_agent import server
+from ops_agent.audit import append_approval_record
 from ops_agent.budget import BudgetExceeded
 from ops_agent.models import Diagnosis, Severity
 
@@ -92,6 +94,27 @@ class HandleDiagnoseTest(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertEqual(body["error"], "internal_error")
 
+    def test_actor_is_available_to_audit_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = Path(tmp) / "approvals.jsonl"
+
+            def fake_run(_q, approver=None, trace_id=None):
+                append_approval_record(
+                    audit_path,
+                    tool_name="restart_service",
+                    tool_input={"service": "postgres"},
+                    approved=False,
+                )
+                return _fake_diagnosis(), []
+
+            with patch("ops_agent.agent.run_agent", side_effect=fake_run):
+                status, _body = server.handle_diagnose({"question": "x"}, actor="alice@example.com")
+
+            record = json.loads(audit_path.read_text(encoding="utf-8").strip())
+
+        self.assertEqual(status, 200)
+        self.assertEqual(record["actor"], "alice@example.com")
+
 
 class HttpEndToEndTest(unittest.TestCase):
     """真起一个 HTTP server,验证路由/鉴权/健康探针端到端通(不打 LLM)。"""
@@ -153,6 +176,10 @@ class HttpEndToEndTest(unittest.TestCase):
             resp = self._post(b'{"question":"\xe6\x85\xa2"}', token="secret")
             self.assertEqual(resp.status, 200)
             self.assertEqual(json.loads(resp.read())["diagnosis"]["severity"], "WARNING")
+
+    def test_actor_header_is_sanitized(self):
+        self.assertEqual(server._request_actor("alice@example.com"), "alice@example.com")
+        self.assertEqual(server._request_actor("../../root"), "webhook")
 
 
 class AsyncDiagnoseHttpTest(unittest.TestCase):

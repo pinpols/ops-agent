@@ -21,13 +21,14 @@ class JobQueueTest(unittest.TestCase):
     def test_processes_job_to_succeeded(self):
         jq = JobQueue(lambda job: {"echo": job.question}, workers=1)
         try:
-            job = jq.submit("hello", target="fbs", trace_id="trace-1")
+            job = jq.submit("hello", target="fbs", trace_id="trace-1", actor="alice")
             self.assertIsNotNone(job)
             done = _wait(jq, job.id)
             self.assertEqual(done.status, SUCCEEDED)
             self.assertEqual(done.result, {"echo": "hello"})
             self.assertEqual(done.target, "fbs")
             self.assertEqual(done.trace_id, "trace-1")
+            self.assertEqual(done.actor, "alice")
         finally:
             jq.shutdown()
 
@@ -81,6 +82,7 @@ class JobQueueTest(unittest.TestCase):
             self.assertEqual(pub["trace_id"], job.trace_id)
             self.assertEqual(pub["status"], SUCCEEDED)
             self.assertEqual(pub["result"], {"ok": True})
+            self.assertIn("actor", pub)
             self.assertIn("created_at", pub)
         finally:
             jq.shutdown()

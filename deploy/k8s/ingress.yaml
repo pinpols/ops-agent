@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: ingress
-          image: ghcr.io/pinpols/ops-agent:latest   # 按实际 registry/tag 覆盖
+          image: ghcr.io/pinpols/ops-agent:0.2.1   # 生产 overlay 建议改用 digest
           args: ["serve", "--host", "0.0.0.0", "--port", "8080"]
           ports:
             - name: http

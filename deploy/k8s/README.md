@@ -21,7 +21,7 @@
 ```bash
 # 1) 改镜像与机密(切勿提交真值)
 #    - 把 config.yaml 里的 Secret 占位换成真 token/DSN/key,或用 External Secrets/SOPS
-#    - kustomization.yaml 覆盖 images.newTag 指向你的 registry/tag
+#    - 生产 overlay 用 images.digest 指向已签名/已扫描的 release 镜像 digest
 # 2) 一键应用
 kubectl apply -k deploy/k8s/
 # 3) 看状态
@@ -40,11 +40,13 @@ kubectl get deploy,po,hpa -l app.kubernetes.io/part-of=ops-agent
 | **最小权限** | 非 root(uid 10001)、`readOnlyRootFilesystem`、`drop ALL` caps;只写 runtime emptyDir 与审计 PVC。 |
 | **Redis 持久化** | AOF on + `noeviction`(队列数据不可被驱逐 = 不丢单)+ PVC。 |
 | **出站边界** | `networkpolicy.yaml` 默认拒绝 ops-agent egress,只放行 DNS、Redis、公网 HTTPS;私网 DB/Prometheus/LLM gateway 用 overlay 精确加白。 |
-| **审计持久化** | `OPS_APPROVAL_LOG` 按 Pod 名写入 `ops-agent-audit` RWX PVC,避免多副本争写同一 JSONL。 |
+| **审计持久化** | `OPS_APPROVAL_LOG` 按 Pod 名写入 `ops-agent-audit` RWX PVC;审计模块仍有 `.lock` 文件锁、多档轮转和 hash chain,支持未来同文件多进程写入。 |
+| **审计主体** | HTTP 调用方可传 `X-Ops-Actor`;worker job 会携带 actor 并写入审批/执行审计记录。 |
 
 ## 生产前还需补
 
 - **Redis HA**:`redis.yaml` 是单实例起步级。生产用托管 Redis 或 Sentinel/Cluster(单点宕=队列不可用)。
+- **镜像发布**:默认清单使用版本 tag,不是 `latest`;正式生产 overlay 应改为 digest,并配合镜像签名/准入策略。
 - **抓指标**:worker 无 HTTP,需把 `OPS_METRICS_FILE` 用 node_exporter textfile collector 或 sidecar 暴露;ingress 已带 `prometheus.io/scrape` 注解。告警规则:`deploy/prometheus/ops-agent-alerts.yml`。
 - **NetworkPolicy overlay**:默认只放行公网 HTTPS;若 LLM gateway、Prometheus 或只读 DB 在私网,需按精确 CIDR/selector 增补 egress。
 - **机密管理**:用 External Secrets/Vault,别用仓库里的示例 Secret。
