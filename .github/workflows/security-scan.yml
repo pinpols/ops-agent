@@ -25,7 +25,7 @@ jobs:
           cache: pip
       - run: pip install bandit[toml]
       - run: bandit -r ops_agent evals -f json -o bandit-report.json || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bandit-report
@@ -40,7 +40,7 @@ jobs:
           pip install semgrep
           semgrep --config=p/python --config=p/security-audit \
             ops_agent evals --json -o semgrep-report.json || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: semgrep-report
