@@ -61,6 +61,6 @@ jobs:
           fetch-depth: 0
       - name: Gitleaks secret scan (observe;稳定后去掉 continue-on-error 转硬闸)
         continue-on-error: true
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
