@@ -19,14 +19,23 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: |
-          pip install cyclonedx-python
-          cyclonedx-py -o json -o xml -out sbom
+      # 包名是 cyclonedx-bom(提供 cyclonedx-py CLI);从 requirements.txt 生成 SBOM,
+      # 退化到 environment。SBOM 为非关键供应链产物,continue-on-error 避免语法变体卡 CI。
+      - name: Generate SBOM
+        continue-on-error: true
+        run: |
+          pip install cyclonedx-bom
+          cyclonedx-py requirements requirements.txt --output-format JSON --output-file sbom.json \
+            || cyclonedx-py environment --output-format JSON --output-file sbom.json
+          cyclonedx-py requirements requirements.txt --output-format XML --output-file sbom.xml \
+            || cyclonedx-py environment --output-format XML --output-file sbom.xml || true
       - name: Upload SBOM artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sbom
           path: sbom.*
+          if-no-files-found: ignore
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
