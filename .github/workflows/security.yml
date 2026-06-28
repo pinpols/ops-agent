@@ -1,0 +1,66 @@
+name: Security
+
+# 供应链与安全门禁:SAST(bandit)+ 依赖漏洞(pip-audit)+ SBOM(CycloneDX)+ 秘钥扫描(gitleaks)。
+# bandit/pip-audit 为硬闸;gitleaks 先 observe(continue-on-error),稳定后转硬闸。
+on:
+  push:
+  pull_request:
+
+jobs:
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install bandit
+        run: python -m pip install --upgrade pip bandit
+      - name: Bandit SAST (medium+ severity, 配置见 pyproject [tool.bandit])
+        run: bandit -r ops_agent evals -ll -c pyproject.toml
+
+  dep-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Dependency vuln scan (pip-audit, 锁文件)
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit --desc -r requirements.lock
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project + cyclonedx
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . cyclonedx-bom
+      - name: Generate CycloneDX SBOM
+        run: cyclonedx-py environment -o sbom.cdx.json
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks secret scan (observe;稳定后去掉 continue-on-error 转硬闸)
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

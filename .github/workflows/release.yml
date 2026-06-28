@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., 0.3.0)"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+      - name: Bump version
+        env:
+          NEW_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          sed -i "s/version = .*/version = \"$NEW_VERSION\"/" pyproject.toml
+          sed -i "s/^## \\[Unreleased\\]/## [$NEW_VERSION] - $(date +%Y-%m-%d)/" CHANGELOG.md
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git add pyproject.toml CHANGELOG.md
+          git commit -m "chore: release v$NEW_VERSION"
+          git tag -a "v$NEW_VERSION" -m "Release $NEW_VERSION"
+          git push origin HEAD:main --force-with-lease
+          git push origin "v$NEW_VERSION"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          NOTES=$(sed -n "/^## \[$VERSION\]/,/^## /p" CHANGELOG.md | head -n -1 | tail -n +2)
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes "$NOTES" \
+            --verify-tag
