@@ -84,3 +84,9 @@ disable_error_code = ["call-overload", "arg-type", "dict-item", "operator", "mis
 # (运行时调用方都传具体值,非 bug)。先放宽这几码、保留其余检查,后续逐个收紧标注后移除本块。
 module = ["ops_agent.tools", "ops_agent.system_tools"]
 disable_error_code = ["operator", "arg-type", "assignment", "call-overload"]
+
+[tool.bandit]
+# 安全 SAST 配置。exclude 测试(含故意的假密钥/假 SQL);
+# B104=容器内 serve 故意绑 0.0.0.0(by-design);其余按 -ll(medium+)在 CI 卡。
+exclude_dirs = ["tests", ".venv"]
+skips = ["B104"]

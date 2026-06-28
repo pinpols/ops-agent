@@ -1,0 +1,60 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+    paths: ["ops_agent/**", "evals/**", "pyproject.toml", "uv.lock"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * 1"  # Weekly Monday 2am UTC
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  bandit:
+    name: Bandit (Python secrets/crypto)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install bandit[toml]
+      - run: bandit -r ops_agent evals -f json -o bandit-report.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+  semgrep:
+    name: Semgrep (SAST rules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          pip install semgrep
+          semgrep --config=p/python --config=p/security-audit \
+            ops_agent evals --json -o semgrep-report.json || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+
+  pip-audit:
+    name: pip-audit (Dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 存量依赖 CVE 暂作「可见但不阻塞」:报告出来作为依赖升级 backlog,先不卡 CI。
+      # 待 urllib3/twisted 等升级清零后,可去掉 continue-on-error 转为硬门禁。
+      - uses: pypa/gh-action-pip-audit@v1.1.0
+        continue-on-error: true
+        with:
+          summary: true
+          require-hashes: false

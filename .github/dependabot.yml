@@ -1,0 +1,24 @@
+version: 2
+# 自动依赖更新(安全补丁 + 版本):pip 依赖 + GitHub Actions 各周一拉 PR。
+# 企业级供应链:依赖漂移/CVE 不靠人盯,机器人定期开 PR,过 CI 后合。
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - ci
+    commit-message:
+      prefix: "chore(ci)"
