@@ -135,6 +135,10 @@ curl -H "Authorization: Bearer $OPS_WEBHOOK_TOKEN" \
   `--target <name>` 或 webhook `{"target": "..."}` 选用;不配则回退单目标 env。
 - **指标**:`query_metrics` 只读查 Prometheus;agent 自身指标走 `/metrics` 或 `OPS_METRICS_FILE`。
 - **预算闸**:`OPS_MAX_RUN_SECONDS` / `OPS_MAX_RUN_TOKENS` 防绕圈烧钱。
+- **⚠️ webhook `question` 是未围栏输入(设计边界)**:它作为"用户问题"直达模型,不像工具输出
+  那样包不可信围栏 —— **告警模板禁止内嵌原始日志内容**(日志属不可信数据,应由 agent 经
+  `read_logs` 等工具自行取证,取证内容才会被围栏+脱敏)。服务端对含围栏定界符的 question
+  直接 400 拒绝(纵深防御),但语义级注入仍取决于模板纪律。
 - **密钥**:支持 `<NAME>_FILE`(docker/k8s secret)注入。
 - **Docker**:`docker build -t ops-agent . && docker run -p 8080:8080 --env-file .env ops-agent`
   (非 root + HEALTHCHECK;基础镜像按 digest 固定)。

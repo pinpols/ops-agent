@@ -436,9 +436,7 @@ class RedisQueue:
             self._r.zrem(self._workers_key, wid)
         # ② RUNNING 卡死兜底(含 worker 活着但任务卡死/心跳键丢失等)
         for jkey in list(self._r.scan_iter(match=_JOB_PREFIX + "*")):
-            status, running_since, worker = self._r.hmget(
-                jkey, "status", "running_since", "worker"
-            )
+            status, running_since, worker = self._r.hmget(jkey, "status", "running_since", "worker")
             if status != RUNNING or not running_since:
                 continue
             if now - float(running_since) <= self._stale_running_seconds:

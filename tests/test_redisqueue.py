@@ -417,9 +417,9 @@ class TerminalCallbackTest(unittest.TestCase):
         with (
             patch("ops_agent.agent.run_agent", side_effect=RuntimeError("boom")),
             patch("ops_agent.callback._post_callback") as cb,
+            self.assertRaises(RuntimeError),
         ):
-            with self.assertRaises(RuntimeError):
-                diagnosis_job_handler(job)
+            diagnosis_job_handler(job)
         cb.assert_not_called()
 
 

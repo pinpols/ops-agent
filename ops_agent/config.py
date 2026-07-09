@@ -223,9 +223,7 @@ class Settings:
             ops_stale_running_seconds=float(
                 os.environ.get("OPS_STALE_RUNNING_SECONDS", str(max_run_seconds * 2))
             ),
-            ops_reaper_interval_seconds=float(
-                os.environ.get("OPS_REAPER_INTERVAL_SECONDS", "30")
-            ),
+            ops_reaper_interval_seconds=float(os.environ.get("OPS_REAPER_INTERVAL_SECONDS", "30")),
         )
 
 

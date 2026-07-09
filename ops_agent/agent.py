@@ -272,9 +272,7 @@ def run_agent(
     METRICS.inc("diagnose_max_steps_total")
     _flush_metrics(settings)
     # MaxStepsExceeded ∈ 不可重试闭集(P2-4):绕圈是确定性失败,worker 直接判 dead 不重试
-    raise MaxStepsExceeded(
-        f"达到 max_steps={max_steps} 仍未得出结论(可能在绕圈,检查工具/prompt)"
-    )
+    raise MaxStepsExceeded(f"达到 max_steps={max_steps} 仍未得出结论(可能在绕圈,检查工具/prompt)")
 
 
 def _flush_metrics(settings: Settings) -> None:
