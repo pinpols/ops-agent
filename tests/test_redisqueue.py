@@ -311,6 +311,99 @@ class CrashSafeConsumeTest(unittest.TestCase):
         self.assertEqual(client.llen("ops:queue:processing:w1"), 0)
 
 
+class ReaperHeartbeatRaceTest(unittest.TestCase):
+    """P0-1:心跳模型 —— 忙 worker(心跳持续续、但不 consume)不得被判死;
+    reaper 判死后回收前须二次确认心跳仍 stale,drain 中途心跳复活要立刻停手。"""
+
+    def test_busy_worker_with_fresh_heartbeat_not_reaped(self):
+        # 模拟忙 worker:handler 长跑期间不 consume,但独立心跳线程持续续心跳
+        client = fakeredis.FakeRedis(decode_responses=True)
+        w1 = RedisQueue(client, worker_id="w1", max_retries=2)
+        job = w1.submit("q")
+        w1.consume(timeout=1)
+        w1.mark_running(job.id)
+        w1.heartbeat()  # 心跳线程在续(即便 consume 不再被调)
+        w2 = RedisQueue(client, worker_id="w2", max_retries=2)
+        stats = w2.reap(now=time.time())
+        self.assertEqual(stats["requeued"], 0)
+        self.assertEqual(client.lrange("ops:queue:processing:w1", 0, -1), [job.id])
+        self.assertIsNotNone(client.zscore("ops:queue:workers", "w1"))  # 心跳没被 zrem
+
+    def test_truly_dead_worker_still_reaped(self):
+        # 心跳停了(真死)→ 照常回收
+        client = fakeredis.FakeRedis(decode_responses=True)
+        w1 = RedisQueue(client, worker_id="w1", max_retries=2)
+        job = w1.submit("q")
+        w1.consume(timeout=1)
+        w1.mark_running(job.id)
+        client.zadd("ops:queue:workers", {"w1": time.time() - 3600})  # 心跳停更
+        w2 = RedisQueue(client, worker_id="w2", max_retries=2)
+        stats = w2.reap(now=time.time())
+        self.assertEqual(stats["requeued"], 1)
+        self.assertIsNone(client.zscore("ops:queue:workers", "w1"))
+
+    def test_reaper_stops_draining_when_heartbeat_revives_mid_drain(self):
+        # 判死后 drain 过程中 w1 心跳恢复 → 停止抢夺剩余在途任务,且不 zrem 其心跳
+        client = fakeredis.FakeRedis(decode_responses=True)
+        w1 = RedisQueue(client, worker_id="w1", max_retries=2)
+        j1 = w1.submit("a")
+        j2 = w1.submit("b")
+        w1.consume(timeout=1)
+        w1.consume(timeout=1)
+        w1.mark_running(j1.id)
+        w1.mark_running(j2.id)
+        client.zadd("ops:queue:workers", {"w1": time.time() - 3600})  # 先呈 stale
+        w2 = RedisQueue(client, worker_id="w2", max_retries=2)
+        real_rpop = client.rpop
+
+        def rpop_and_revive(key, *a, **kw):
+            out = real_rpop(key, *a, **kw)
+            client.zadd("ops:queue:workers", {"w1": time.time()})  # w1 恢复心跳
+            return out
+
+        client.rpop = rpop_and_revive
+        try:
+            stats = w2.reap(now=time.time())
+        finally:
+            client.rpop = real_rpop
+        self.assertEqual(stats["requeued"], 1)  # 只抢走了复活前的那一个
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 1)  # 剩余在途没被抢
+        self.assertIsNotNone(client.zscore("ops:queue:workers", "w1"))  # 心跳没被 zrem
+
+
+class WorkerHeartbeatThreadTest(unittest.TestCase):
+    """P0-1①:独立心跳线程 —— handler 忙跑 120s 时 consume 不会被调,心跳必须独立续。"""
+
+    def test_heartbeat_loop_renews_periodically_until_stop(self):
+        rq = MagicMock()
+        stop = threading.Event()
+        t = threading.Thread(
+            target=worker_main._heartbeat_loop, args=(rq, stop, 0.01), daemon=True
+        )
+        t.start()
+        deadline = time.time() + 2
+        while time.time() < deadline and rq.heartbeat.call_count < 3:
+            time.sleep(0.01)
+        stop.set()
+        t.join(timeout=1)
+        self.assertGreaterEqual(rq.heartbeat.call_count, 3)
+
+    def test_heartbeat_loop_survives_redis_errors(self):
+        rq = MagicMock()
+        rq.heartbeat.side_effect = ConnectionError("redis down")
+        stop = threading.Event()
+        t = threading.Thread(
+            target=worker_main._heartbeat_loop, args=(rq, stop, 0.01), daemon=True
+        )
+        t.start()
+        deadline = time.time() + 2
+        while time.time() < deadline and rq.heartbeat.call_count < 2:
+            time.sleep(0.01)
+        stop.set()
+        t.join(timeout=1)
+        self.assertGreaterEqual(rq.heartbeat.call_count, 2)  # 异常不终结心跳线程
+
+
 class PromoteAtomicityTest(unittest.TestCase):
     """P1-2:promote_due_retries 的 zrem→lpush 必须原子;崩溃窗口不得丢任务。"""
 
@@ -536,6 +629,11 @@ class WorkerRunLifecycleTest(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertIn(signal.SIGTERM, handlers)  # 注册了优雅停机
                 self.assertTrue(os.path.exists(hb))  # 心跳被 touch(liveness 依赖)
+                # P0-1:独立心跳线程在续 Redis 心跳(consume 被 mock,不会间接触发)
+                deadline2 = time.time() + 3
+                while time.time() < deadline2 and fake_rq.heartbeat.call_count < 1:
+                    time.sleep(0.02)
+                fake_rq.heartbeat.assert_called()
                 handlers[signal.SIGTERM](signal.SIGTERM, None)  # 触发 SIGTERM
                 t.join(timeout=5)
                 self.assertFalse(t.is_alive())  # run() 优雅退出

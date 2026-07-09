@@ -424,16 +424,23 @@ class RedisQueue:
             wid = key[len(self._processing_prefix) :]
             if wid == self._worker_id:
                 continue  # 自己的在途由自己收口
-            score = self._r.zscore(self._workers_key, wid)
-            if score is not None and now - float(score) < self._worker_dead_after_seconds:
+            if self._worker_alive(wid, now):
                 continue  # 心跳新鲜,worker 活着
+            # P0-1③:判死后、每次回收前都再核对心跳 —— 缩小"worker 只是忙/刚复活"的竞态窗,
+            # 也防 drain 循环把复活 worker 新领的任务一并抢走。
+            revived = False
             while True:
+                if self._worker_alive(wid, now):
+                    revived = True
+                    logger.warning("reaper 中止回收:worker=%s 心跳已恢复", wid)
+                    break
                 job_id = self._r.rpop(key)
                 if job_id is None:
                     break
                 logger.warning("reaper 回收死 worker=%s 在途任务 job_id=%s", wid, job_id)
                 self._reap_one(job_id, stats, error=f"worker_crashed:{wid}")
-            self._r.zrem(self._workers_key, wid)
+            if not revived:
+                self._r.zrem(self._workers_key, wid)
         # ② RUNNING 卡死兜底(含 worker 活着但任务卡死/心跳键丢失等)
         for jkey in list(self._r.scan_iter(match=_JOB_PREFIX + "*")):
             status, running_since, worker = self._r.hmget(jkey, "status", "running_since", "worker")
@@ -450,6 +457,10 @@ class RedisQueue:
             METRICS.inc("jobs_reaped_total", sum(stats.values()))
             self.update_queue_metrics()
         return stats
+
+    def _worker_alive(self, wid: str, now: float) -> bool:
+        score = self._r.zscore(self._workers_key, wid)
+        return score is not None and now - float(score) < self._worker_dead_after_seconds
 
     def _reap_one(self, job_id: str, stats: dict[str, int], *, error: str) -> None:
         if self._load(job_id) is None:

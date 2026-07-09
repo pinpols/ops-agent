@@ -102,6 +102,18 @@ def _worker_loop(rq: WorkerQueue, handler: Any, stop: threading.Event) -> None:
             stop.wait(delay)
 
 
+def _heartbeat_loop(rq: Any, stop: threading.Event, interval: float) -> None:
+    """独立心跳线程(P0-1①):旧实现只在 consume() 续心跳,handler 忙跑 max_run(可达
+    120s+)期间整进程无心跳,dead_after 一过就被对面 reaper 判死、在途任务被抢走 →
+    双执行 + 双回调。心跳独立于消费循环续,handler 再忙也不会"假死"。"""
+    while not stop.is_set():
+        try:
+            rq.heartbeat()
+        except Exception:  # noqa: BLE001 - Redis 抖动不终结心跳线程,下一轮重试
+            logger.warning("worker 心跳续约失败,下一轮重试", exc_info=True)
+        stop.wait(interval)
+
+
 def _reaper_loop(rq: Any, stop: threading.Event, interval: float) -> None:
     """崩溃回收循环(P1-1):启动先 reap 一次(接管上任 worker 的遗留),之后周期扫。"""
     failures = 0
@@ -150,6 +162,11 @@ def run(settings: Settings | None = None) -> None:
             args=(rq, stop, max(1.0, settings.ops_reaper_interval_seconds)),
             name="reaper",
         )
+    )
+    # 心跳线程(P0-1①):间隔取判死窗口的 1/6(夹在 1~10s),留足网络抖动余量
+    hb_interval = max(1.0, min(10.0, settings.ops_worker_dead_after_seconds / 6))
+    threads.append(
+        threading.Thread(target=_heartbeat_loop, args=(rq, stop, hb_interval), name="heartbeat")
     )
     for t in threads:
         t.start()

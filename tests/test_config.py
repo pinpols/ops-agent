@@ -88,5 +88,56 @@ class ProfileValidationTest(unittest.TestCase):
             self.assertFalse(Settings.from_env().ops_redact_artifacts)
 
 
+class WorkerDeadAfterDerivationTest(unittest.TestCase):
+    """P0-1②:dead_after 默认必须覆盖"handler 忙跑 max_run + LLM 超时"的合法最坏窗口,
+    否则忙 worker 会被对面 reaper 判死、在途任务被抢走造成双执行。"""
+
+    def test_dead_after_default_derives_from_run_and_llm_budget(self):
+        with patch.dict(
+            os.environ,
+            {"OPS_MAX_RUN_SECONDS": "120", "OPS_LLM_TIMEOUT_SECONDS": "90"},
+            clear=True,
+        ):
+            s = Settings.from_env()
+            self.assertEqual(s.ops_worker_dead_after_seconds, 120 + 90 + 60)
+
+    def test_dead_after_default_without_llm_override(self):
+        # 未配 LLM 超时 → llm_timeout 派生为 max_run,dead_after = 2×max_run + 60
+        with patch.dict(os.environ, {"OPS_MAX_RUN_SECONDS": "100"}, clear=True):
+            self.assertEqual(Settings.from_env().ops_worker_dead_after_seconds, 100 + 100 + 60)
+
+    def test_dead_after_explicit_env_wins_but_warns_when_below_max_run(self):
+        with (
+            patch.dict(
+                os.environ,
+                {"OPS_MAX_RUN_SECONDS": "120", "OPS_WORKER_DEAD_AFTER_SECONDS": "60"},
+                clear=True,
+            ),
+            self.assertLogs("ops_agent.config", level="WARNING") as logs,
+        ):
+            s = Settings.from_env()
+        self.assertEqual(s.ops_worker_dead_after_seconds, 60)  # 显式值仍生效(只警告不拒绝)
+        self.assertTrue(any("OPS_WORKER_DEAD_AFTER_SECONDS" in m for m in logs.output))
+
+    def test_dead_after_explicit_env_above_max_run_no_warning(self):
+        import logging
+
+        records: list[logging.LogRecord] = []
+        handler = logging.Handler()
+        handler.emit = records.append  # type: ignore[method-assign]
+        logging.getLogger("ops_agent.config").addHandler(handler)
+        try:
+            with patch.dict(
+                os.environ,
+                {"OPS_MAX_RUN_SECONDS": "120", "OPS_WORKER_DEAD_AFTER_SECONDS": "600"},
+                clear=True,
+            ):
+                s = Settings.from_env()
+        finally:
+            logging.getLogger("ops_agent.config").removeHandler(handler)
+        self.assertEqual(s.ops_worker_dead_after_seconds, 600)
+        self.assertFalse(any("OPS_WORKER_DEAD_AFTER_SECONDS" in r.getMessage() for r in records))
+
+
 if __name__ == "__main__":
     unittest.main()
