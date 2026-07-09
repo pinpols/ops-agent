@@ -246,15 +246,29 @@ class RedisQueue:
 
         **存在守卫**(P2-2):hash 已 TTL 过期/驱逐时,裸 hset 会重建一个无 question、
         无 TTL 的僵尸 —— 这里判 lost(计 jobs_lost_total)并清 processing 登记,不执行。
+
+        **终态守卫**(P1-2):job 被 reaper 抢走重入队、原 worker 已写 SUCCEEDED/FAILED 后,
+        第二个 worker 取到同 id —— 旧实现只查存在性,会把终态改回 RUNNING 重跑;
+        这里遇终态即清 processing 登记并返回 False(调用方跳过执行)。
         """
         key = self._job_key(job_id)
         with self._r.pipeline() as pipe:
             while True:
                 try:
                     pipe.watch(key)
-                    if not pipe.exists(key):
+                    status = pipe.hget(key, "status")
+                    if status is None:
                         pipe.unwatch()
                         METRICS.inc("jobs_lost_total")
+                        self.discard(job_id)
+                        return False
+                    if status in (SUCCEEDED, FAILED):
+                        pipe.unwatch()
+                        logger.warning(
+                            "mark_running 拒绝已终态任务 job_id=%s status=%s(重复投递副本,跳过)",
+                            job_id,
+                            status,
+                        )
                         self.discard(job_id)
                         return False
                     pipe.multi()

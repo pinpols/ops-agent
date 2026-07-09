@@ -311,6 +311,50 @@ class CrashSafeConsumeTest(unittest.TestCase):
         self.assertEqual(client.llen("ops:queue:processing:w1"), 0)
 
 
+class MarkRunningTerminalGuardTest(unittest.TestCase):
+    """P1-2:job 被 reaper 抢走重入队、原 worker 已写 SUCCEEDED 后,第二个 worker 取到
+    同 id 时 mark_running 不得把终态改回 RUNNING 重跑。"""
+
+    def test_mark_running_refuses_succeeded_job(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq = RedisQueue(client, worker_id="w1")
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        rq.complete(job.id, {"ok": True})
+        # 重复投递:同 id 再次被消费(reaper 抢走后重入队的迟到副本)
+        client.lpush(rq._queue_key, job.id)
+        got = rq.consume(timeout=1)
+        self.assertEqual(got, job.id)
+        self.assertFalse(rq.mark_running(job.id))  # 终态不回翻
+        self.assertEqual(rq.get(job.id).status, SUCCEEDED)
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 0)  # 在途登记同步摘除
+
+    def test_mark_running_refuses_failed_job(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq = RedisQueue(client, worker_id="w1", max_retries=0)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.fail_or_retry(job.id, "boom")  # 直接终局 FAILED
+        client.lpush(rq._queue_key, job.id)
+        rq.consume(timeout=1)
+        self.assertFalse(rq.mark_running(job.id))
+        self.assertEqual(rq.get(job.id).status, FAILED)
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 0)
+
+    def test_process_once_skips_terminal_job_without_running_handler(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq = RedisQueue(client, worker_id="w1")
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.complete(job.id, {"ok": True})
+        client.lpush(rq._queue_key, job.id)
+        calls = []
+        self.assertIsNone(process_once(rq, lambda j: calls.append(j) or {}, timeout=1))
+        self.assertEqual(calls, [])  # handler 没被重跑
+        self.assertEqual(rq.get(job.id).result, {"ok": True})  # 结果没被覆写
+
+
 class ReaperHeartbeatRaceTest(unittest.TestCase):
     """P0-1:心跳模型 —— 忙 worker(心跳持续续、但不 consume)不得被判死;
     reaper 判死后回收前须二次确认心跳仍 stale,drain 中途心跳复活要立刻停手。"""
