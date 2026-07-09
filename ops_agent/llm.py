@@ -48,7 +48,13 @@ def make_client() -> LLMClient:
         # 由网关 config 的 routes 决定实际模型链(OPS_GATEWAY_ROUTE 可配,默认 default)。
         route = os.getenv("OPS_GATEWAY_ROUTE", "default")
         return _GatewayAnthropicShim(build_gateway_client(), route)
-    return Anthropic(max_retries=get_settings().anthropic_max_retries)
+    settings = get_settings()
+    # timeout(P2-6):SDK 默认 10min × (1+max_retries),远超 run 预算(OPS_MAX_RUN_SECONDS),
+    # 卡住的单次调用会让预算闸形同虚设;默认派生为 run 预算,可经 OPS_LLM_TIMEOUT_SECONDS 覆盖。
+    return Anthropic(
+        max_retries=settings.anthropic_max_retries,
+        timeout=settings.ops_llm_timeout_seconds,
+    )
 
 
 def gateway_enabled() -> bool:
@@ -73,7 +79,11 @@ def build_gateway_client() -> Any:
         import anthropic
         from agent_ctl.providers.anthropic_provider import AnthropicProvider
 
-        native = anthropic.Anthropic(max_retries=get_settings().anthropic_max_retries)
+        settings = get_settings()
+        native = anthropic.Anthropic(
+            max_retries=settings.anthropic_max_retries,
+            timeout=settings.ops_llm_timeout_seconds,
+        )
         providers = {"anthropic": AnthropicProvider(native)}
     return GatewayClient.from_config(cfg, providers)
 

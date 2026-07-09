@@ -19,6 +19,7 @@ import hmac
 import json
 import logging
 import signal
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -172,7 +173,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(202, {"job_id": job.id, "trace_id": job.trace_id, "status": job.status})
             return
         # 同步模式(默认):内联跑完返回(向后兼容)。
-        status, body = handle_diagnose(payload, actor=actor)
+        # P2-7 并发闸:每个请求占一个 HTTP 线程内联跑多步 LLM(10-60s),无闸时并发告警风暴
+        # 会同时挂起大量 LLM 调用(烧钱 + 线程堆积);超限快速 429,让上游退避/走异步模式。
+        gate = getattr(self.server, "sync_gate", None)
+        if gate is not None and not gate.acquire(blocking=False):
+            METRICS.inc("webhook_busy_total")
+            self._send(429, {"error": "busy", "detail": "同步诊断并发已满,稍后重试或改用异步模式"})
+            return
+        try:
+            status, body = handle_diagnose(payload, actor=actor)
+        finally:
+            if gate is not None:
+                gate.release()
         self._send(status, body)
 
 
@@ -186,6 +198,10 @@ def serve(
     httpd = ThreadingHTTPServer((host, port), _Handler)
     # 鉴权 token 启动时快照一次:一致(密钥轮换不会让并发请求读到半新半旧)+ 避免每请求重读密钥文件。
     httpd.expected_token = settings.ops_webhook_token  # type: ignore[attr-defined]
+    # 同步诊断并发闸(P2-7,OPS_SYNC_MAX_CONCURRENT,默认 4);异步模式走队列背压,不经此闸。
+    httpd.sync_gate = threading.BoundedSemaphore(  # type: ignore[attr-defined]
+        max(1, settings.ops_sync_max_concurrent)
+    )
     # 异步模式:/diagnose 转入队 + 202。后端二选一:
     #   memory(默认,Step 1):进程内队列 + 内置 worker 池。
     #   redis(Step 2):真队列(ingress 只入队/查询),worker 由独立进程 serve-worker 跑。

@@ -295,6 +295,50 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
         self.assertEqual(received[1]["error"], "RuntimeError: boom")
 
 
+class SyncConcurrencyGateTest(unittest.TestCase):
+    """P2-7:同步模式无并发闸 —— N 个并发 webhook 各占线程内联跑 LLM,拖垮进程;超限应 429。"""
+
+    def _start(self, gate_size: int) -> ThreadingHTTPServer:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server._Handler)
+        httpd.expected_token = "tok"
+        httpd.sync_gate = threading.BoundedSemaphore(gate_size)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        return httpd
+
+    def _post(self, port: int):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/diagnose",
+            data=json.dumps({"question": "x"}).encode("utf-8"),
+            headers={"Authorization": "Bearer tok", "Content-Type": "application/json"},
+            method="POST",
+        )
+        return urllib.request.urlopen(req, timeout=5)
+
+    def test_sync_mode_returns_429_when_gate_exhausted(self):
+        httpd = self._start(1)
+        try:
+            httpd.sync_gate.acquire()  # 占满信号量,模拟在途诊断打满
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                self._post(httpd.server_address[1])
+            self.assertEqual(ctx.exception.code, 429)
+            self.assertEqual(json.loads(ctx.exception.read())["error"], "busy")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_gate_released_after_each_request(self):
+        httpd = self._start(1)
+        try:
+            with patch("ops_agent.agent.run_agent", return_value=(_fake_diagnosis(), [])):
+                for _ in range(2):  # 串行两次都应 200 —— 证明请求结束必归还闸
+                    resp = self._post(httpd.server_address[1])
+                    self.assertEqual(resp.status, 200)
+                    resp.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 class CallbackPayloadTest(unittest.TestCase):
     def test_callback_body_includes_attempts(self):
         # P2-3:终局回调 payload 带 attempts,下游能区分"重试几次后死掉"

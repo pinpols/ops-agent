@@ -23,6 +23,33 @@ class MakeClientTest(unittest.TestCase):
         self.assertGreaterEqual(anthropic.call_args.kwargs.get("max_retries"), 4)
 
 
+class TimeoutTest(unittest.TestCase):
+    """P2-6:SDK 默认 timeout 10min × (1+重试),远超 run 预算 —— 必须显式收紧,预算闸才有意义。"""
+
+    @patch("ops_agent.llm.Anthropic")
+    def test_timeout_derived_from_run_budget(self, anthropic):
+        with patch.dict(
+            os.environ, {"OPS_MAX_RUN_SECONDS": "60", "OPS_PROFILE": "dev"}, clear=True
+        ):
+            llm.make_client()
+        self.assertEqual(anthropic.call_args.kwargs.get("timeout"), 60.0)
+
+    @patch("ops_agent.llm.Anthropic")
+    def test_timeout_env_override(self, anthropic):
+        with patch.dict(os.environ, {"OPS_LLM_TIMEOUT_SECONDS": "33"}, clear=True):
+            llm.make_client()
+        self.assertEqual(anthropic.call_args.kwargs.get("timeout"), 33.0)
+
+    @patch("ops_agent.llm.Anthropic")
+    def test_default_timeout_bounded(self, anthropic):
+        # 默认(不配任何 env)也必须有有限 timeout,不许回落 SDK 默认(600s)
+        with patch.dict(os.environ, {}, clear=True):
+            llm.make_client()
+        timeout = anthropic.call_args.kwargs.get("timeout")
+        self.assertIsNotNone(timeout)
+        self.assertLessEqual(timeout, 120.0)
+
+
 class BlockDualAccessTest(unittest.TestCase):
     def test_block_supports_attr_and_dict_access(self):
         b = llm._Block({"type": "tool_use", "input": {"x": 1}})
