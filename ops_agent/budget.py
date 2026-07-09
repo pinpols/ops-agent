@@ -12,6 +12,20 @@ class BudgetExceeded(RuntimeError):
     """墙钟或 token 预算耗尽。message 含已用量,供降级展示。"""
 
 
+class MaxStepsExceeded(RuntimeError):
+    """达到 max_steps 仍未收口(模型绕圈)。RuntimeError 子类,兼容既有 except RuntimeError。"""
+
+
+# 不可重试异常闭集(P2-4):确定性失败,重试注定同样结局、只会重复烧 LLM 预算。
+# worker 据此直接判 dead 进 DLQ,交人工处置(调预算/prompt/max_steps 后 dlq-requeue)。
+NON_RETRYABLE_ERRORS: tuple[type[BaseException], ...] = (BudgetExceeded, MaxStepsExceeded)
+
+
+def is_non_retryable(exc: BaseException) -> bool:
+    """判定异常是否不可重试(含 exception chaining 场景不展开,只看类型本身)。"""
+    return isinstance(exc, NON_RETRYABLE_ERRORS)
+
+
 @dataclass
 class RunBudget:
     """单次 run 的预算闸。time_fn 可注入便于测试(默认 time.monotonic)。"""

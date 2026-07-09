@@ -5,14 +5,25 @@
 worker 崩溃/重启可恢复,可水平扩展。
 
 数据布局:
-- 队列:Redis LIST `<queue_key>`(ingress LPUSH,worker BRPOP)。
-- 任务:Redis HASH `<ns>:job:<id>`(question/target/status/result/error/created_at/attempts),带 TTL。
+- 队列:Redis LIST `<queue_key>`(ingress LPUSH,worker BLMOVE 到 processing list)。
+- 在途:Redis LIST `<queue_key>:processing:<worker_id>`(per-worker 在途登记,崩溃可回收)。
+- 心跳:Redis ZSET `<queue_key>:workers`(worker_id → 最近心跳时间,reaper 判活)。
+- 任务:Redis HASH `<ns>:job:<id>`(question/target/status/result/error/created_at/attempts/
+  running_since/worker),带 TTL。
 - 死信:Redis LIST `<dlq_key>`(超重试上限的 job_id)。
+
+**at-least-once 语义**(ADR-0003):出队用 LMOVE 而非破坏性 BRPOP —— worker 硬崩
+(SIGKILL/OOM/滚动发布超 grace period)后,在途任务仍留在它的 processing list;
+`reap()`(worker 启动时 + 周期性)把死 worker 的在途任务经 `fail_or_retry` 回灌主队列或 DLQ,
+另兜底回收 RUNNING 超 `stale_running_seconds` 的卡死任务。任务不再无声蒸发到 24h TTL。
 
 `redis` 是**可选依赖**(`pip install ops-agent[redis]`),仅本模块延迟 import;memory 后端不需要它。
 """
 
 import json
+import logging
+import os
+import socket
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -25,7 +36,14 @@ if TYPE_CHECKING:
 from ops_agent.jobqueue import FAILED, QUEUED, RUNNING, SUCCEEDED, DiagnosisJob
 from ops_agent.metrics import METRICS
 
+logger = logging.getLogger("ops_agent.redisqueue")
+
 _JOB_PREFIX = "ops:job:"
+
+
+def _default_worker_id() -> str:
+    """worker 身份:主机名+pid+随机尾缀 —— 重启后是新身份,旧 processing list 由 reaper 回收。"""
+    return f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
 
 class RedisQueue:
@@ -44,6 +62,9 @@ class RedisQueue:
         retry_base_seconds: float = 1.0,
         retry_max_seconds: float = 60.0,
         queue_depth_alert_threshold: int = 0,
+        worker_id: str | None = None,
+        worker_dead_after_seconds: float = 60.0,
+        stale_running_seconds: float = 240.0,
     ) -> None:
         self._r = client
         self._queue_key = queue_key
@@ -55,6 +76,13 @@ class RedisQueue:
         self._retry_base_seconds = max(0.0, retry_base_seconds)
         self._retry_max_seconds = max(0.0, retry_max_seconds)
         self._queue_depth_alert_threshold = max(0, queue_depth_alert_threshold)
+        # P1-1 崩溃安全消费:per-worker processing list + 心跳 zset + reaper 参数
+        self._worker_id = worker_id or _default_worker_id()
+        self._processing_prefix = f"{queue_key}:processing:"
+        self._processing_key = self._processing_prefix + self._worker_id
+        self._workers_key = f"{queue_key}:workers"
+        self._worker_dead_after_seconds = max(1.0, worker_dead_after_seconds)
+        self._stale_running_seconds = max(1.0, stale_running_seconds)
 
     @classmethod
     def from_url(cls, url: str, **kwargs: Any) -> "RedisQueue":
@@ -78,6 +106,8 @@ class RedisQueue:
             retry_base_seconds=settings.ops_retry_base_seconds,
             retry_max_seconds=settings.ops_retry_max_seconds,
             queue_depth_alert_threshold=settings.ops_queue_depth_alert_threshold,
+            worker_dead_after_seconds=settings.ops_worker_dead_after_seconds,
+            stale_running_seconds=settings.ops_stale_running_seconds,
         )
 
     # ── 序列化 ────────────────────────────────────────────────
@@ -191,17 +221,55 @@ class RedisQueue:
 
     # ── worker(serve-worker)──────────────────────────────────
     def consume(self, timeout: int = 1) -> str | None:
-        """阻塞取一个 job_id(BRPOP);超时返回 None。"""
-        self.promote_due_retries()
-        item = self._r.brpop([self._queue_key], timeout=timeout)
-        if item is None:
-            self.update_queue_metrics()
-            return None
-        self.update_queue_metrics()
-        return item[1]  # (key, value)
+        """阻塞取一个 job_id;超时返回 None。
 
-    def mark_running(self, job_id: str) -> None:
-        self._r.hset(self._job_key(job_id), "status", RUNNING)
+        **崩溃安全**(P1-1):BLMOVE(RIGHT→LEFT)把 job_id 原子挪进本 worker 的
+        processing list,而非 BRPOP 破坏性出队 —— worker 硬崩后在途任务可被 reaper 回收。
+        顺带续心跳(reaper 据此判本 worker 存活)。
+        """
+        self.promote_due_retries()
+        self.heartbeat()
+        job_id = self._r.blmove(self._queue_key, self._processing_key, timeout, "RIGHT", "LEFT")
+        self.update_queue_metrics()
+        return job_id
+
+    def heartbeat(self, now: float | None = None) -> None:
+        """续 worker 心跳(zset:worker_id → 时间戳)。consume 每次自动调用。"""
+        self._r.zadd(self._workers_key, {self._worker_id: time.time() if now is None else now})
+
+    def discard(self, job_id: str) -> None:
+        """把一个 job_id 从本 worker 的 processing list 摘除(幽灵 id / 已判 lost 用)。"""
+        self._r.lrem(self._processing_key, 1, job_id)
+
+    def mark_running(self, job_id: str) -> bool:
+        """标记 RUNNING + 记 running_since/worker(reaper 判卡死依据)。
+
+        **存在守卫**(P2-2):hash 已 TTL 过期/驱逐时,裸 hset 会重建一个无 question、
+        无 TTL 的僵尸 —— 这里判 lost(计 jobs_lost_total)并清 processing 登记,不执行。
+        """
+        key = self._job_key(job_id)
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(key)
+                    if not pipe.exists(key):
+                        pipe.unwatch()
+                        METRICS.inc("jobs_lost_total")
+                        self.discard(job_id)
+                        return False
+                    pipe.multi()
+                    pipe.hset(
+                        key,
+                        mapping={
+                            "status": RUNNING,
+                            "running_since": str(time.time()),
+                            "worker": self._worker_id,
+                        },
+                    )
+                    pipe.execute()
+                    return True
+                except WatchError:
+                    continue
 
     def complete(self, job_id: str, result: dict) -> None:
         """标记成功。**原子 + 终态守卫**:WATCH 状态 → 仅当未终态/未丢失才写。
@@ -217,12 +285,14 @@ class RedisQueue:
                     status = pipe.hget(key, "status")
                     if status is None or status in (SUCCEEDED, FAILED):
                         pipe.unwatch()
+                        self.discard(job_id)  # 在途登记别悬空
                         return  # 哈希已丢失 / 已终态 → 不覆写、不复活
                     pipe.multi()
                     pipe.hset(
                         key,
                         mapping={"status": SUCCEEDED, "result": json.dumps(result), "error": ""},
                     )
+                    pipe.lrem(self._processing_key, 1, job_id)  # 在途登记随终态同事务摘除
                     pipe.execute()
                     break
                 except WatchError:
@@ -230,14 +300,17 @@ class RedisQueue:
         METRICS.inc("jobs_succeeded_total")
         self.update_queue_metrics()
 
-    def fail_or_retry(self, job_id: str, error: str) -> str:
-        """失败处理:未超上限 → 重入队('retried');超限 → DLQ('dead');哈希已丢失 → 'lost'。
+    def fail_or_retry(self, job_id: str, error: str, *, retryable: bool = True) -> str:
+        """失败处理:未超上限 → 重入队('retried');超限或不可重试 → DLQ('dead');哈希丢失 → 'lost'。
 
         **原子 + 终态/存在守卫**(WATCH/MULTI):
         - 旧实现 `hincrby` 在 hash 已 TTL 过期时会**重建一个无 TTL、丢了 question 的僵尸 job**
           并被当空诊断处理 —— 这里先 WATCH+读状态,缺失则判 lost、不复活。
         - 旧实现无终态守卫:已 SUCCEEDED 的 job 被迟到 retry 覆写回 QUEUED → 重复诊断 + 状态翻转。
-        - hincrby/hset/zadd 三步非原子 → 改为 MULTI 单事务。
+        - hincrby/hset/zadd 三步非原子 → 改为 MULTI 单事务;processing 登记随终态同事务摘除。
+
+        `retryable=False`(P2-4):确定性失败(预算耗尽/max_steps)直接判 dead 进 DLQ,
+        不浪费重试预算重复烧钱。终局失败(dead)才投递 failed 回调(P2-3)。
         """
         key = self._job_key(job_id)
         with self._r.pipeline() as pipe:
@@ -248,12 +321,14 @@ class RedisQueue:
                     if status is None:
                         pipe.unwatch()
                         METRICS.inc("jobs_lost_total")
+                        self.discard(job_id)
                         return "lost"  # 哈希已丢失(TTL/驱逐)→ 不用 hincrby 复活僵尸
                     if status in (SUCCEEDED, FAILED):
                         pipe.unwatch()
+                        self.discard(job_id)
                         return "dead" if status == FAILED else "succeeded"  # 已终态,不重处理
                     attempts = int(pipe.hget(key, "attempts") or 0) + 1
-                    if attempts <= self._max_retries:
+                    if retryable and attempts <= self._max_retries:
                         retry_after = time.time() + self._retry_delay(attempts)
                         pipe.multi()
                         pipe.hset(
@@ -266,6 +341,7 @@ class RedisQueue:
                             },
                         )
                         pipe.zadd(self._retry_key, {job_id: retry_after})
+                        pipe.lrem(self._processing_key, 1, job_id)
                         pipe.execute()
                         outcome, metric = "retried", "jobs_retried_total"
                     else:
@@ -275,6 +351,7 @@ class RedisQueue:
                             mapping={"attempts": str(attempts), "status": FAILED, "error": error},
                         )
                         pipe.lpush(self._dlq_key, job_id)
+                        pipe.lrem(self._processing_key, 1, job_id)
                         pipe.execute()
                         outcome, metric = "dead", "jobs_failed_total"
                     break
@@ -282,7 +359,20 @@ class RedisQueue:
                     continue
         METRICS.inc(metric)
         self.update_queue_metrics()
+        if outcome == "dead":
+            self._notify_failed(job_id)  # P2-3:只在终局失败投递 failed 回调(带 attempts)
         return outcome
+
+    def _notify_failed(self, job_id: str) -> None:
+        """终局失败回调(best-effort):dead 才投递,避免"先 failed 后 succeeded"的乱序信号。"""
+        try:
+            from ops_agent.callback import _post_callback
+
+            job = self._load(job_id)
+            if job is not None:
+                _post_callback(job, status="failed", error=job.error)
+        except Exception as exc:  # noqa: BLE001 - 回调失败不影响队列状态机
+            logger.warning("终局失败回调投递异常 job_id=%s: %s", job_id, exc)
 
     def _retry_delay(self, attempts: int) -> float:
         if self._retry_base_seconds <= 0:
@@ -290,17 +380,87 @@ class RedisQueue:
         return min(self._retry_max_seconds, self._retry_base_seconds * (2 ** max(0, attempts - 1)))
 
     def promote_due_retries(self, now: float | None = None) -> int:
-        """把到期重试任务从 delayed zset 移回主队列。返回提升数量。"""
+        """把到期重试任务从 delayed zset 移回主队列。返回提升数量。
+
+        **原子**(P1-2):旧实现 zrem→lpush 两步裸调,zrem 成功后崩溃/断连 → 任务从 zset
+        消失且未入队(永久丢失)。改 WATCH retry_key + MULTI(zrem+lpush)单事务:
+        要么整体提交(全部入队),要么整体不发生(全部留在 zset 等下一轮),崩溃窗口不丢任务;
+        并发 worker 同扫时 WATCH 冲突方重试,不会双份入队。
+        """
         now = time.time() if now is None else now
-        job_ids = list(self._r.zrangebyscore(self._retry_key, 0, now))
-        promoted = 0
-        for job_id in job_ids:
-            if self._r.zrem(self._retry_key, job_id):
-                self._r.lpush(self._queue_key, job_id)
-                promoted += 1
-        if promoted:
-            self.update_queue_metrics()
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(self._retry_key)
+                    job_ids = list(pipe.zrangebyscore(self._retry_key, 0, now))
+                    if not job_ids:
+                        pipe.unwatch()
+                        return 0
+                    pipe.multi()
+                    pipe.zrem(self._retry_key, *job_ids)
+                    for job_id in job_ids:
+                        pipe.lpush(self._queue_key, job_id)
+                    pipe.execute()
+                    promoted = len(job_ids)
+                    break
+                except WatchError:
+                    continue  # 并发 worker 抢先提升 → 重读 zset(乐观锁,不双入队)
+        self.update_queue_metrics()
         return promoted
+
+    # ── reaper(P1-1:崩溃回收)────────────────────────────────
+    def reap(self, now: float | None = None) -> dict[str, int]:
+        """回收两类残留(worker 启动时 + 周期性调用):
+
+        ① **死 worker 的 processing list**:心跳超 `worker_dead_after_seconds` 判死,
+           在途任务逐个经 `fail_or_retry` 回灌主队列(计 attempts)或进 DLQ;hash 已蒸发计 lost。
+        ② **RUNNING 卡死兜底**:worker 心跳还在但单任务 running_since 超
+           `stale_running_seconds`(默认 2×OPS_MAX_RUN_SECONDS)→ 同样走 fail_or_retry。
+        """
+        now = time.time() if now is None else now
+        stats = {"requeued": 0, "dead": 0, "lost": 0}
+        # ① 死 worker 在途回收
+        for key in list(self._r.scan_iter(match=self._processing_prefix + "*")):
+            wid = key[len(self._processing_prefix) :]
+            if wid == self._worker_id:
+                continue  # 自己的在途由自己收口
+            score = self._r.zscore(self._workers_key, wid)
+            if score is not None and now - float(score) < self._worker_dead_after_seconds:
+                continue  # 心跳新鲜,worker 活着
+            while True:
+                job_id = self._r.rpop(key)
+                if job_id is None:
+                    break
+                logger.warning("reaper 回收死 worker=%s 在途任务 job_id=%s", wid, job_id)
+                self._reap_one(job_id, stats, error=f"worker_crashed:{wid}")
+            self._r.zrem(self._workers_key, wid)
+        # ② RUNNING 卡死兜底(含 worker 活着但任务卡死/心跳键丢失等)
+        for jkey in list(self._r.scan_iter(match=_JOB_PREFIX + "*")):
+            status, running_since, worker = self._r.hmget(jkey, "status", "running_since", "worker")
+            if status != RUNNING or not running_since:
+                continue
+            if now - float(running_since) <= self._stale_running_seconds:
+                continue
+            job_id = jkey[len(_JOB_PREFIX) :]
+            if worker:
+                self._r.lrem(self._processing_prefix + worker, 1, job_id)
+            logger.warning("reaper 回收 RUNNING 卡死任务 job_id=%s worker=%s", job_id, worker)
+            self._reap_one(job_id, stats, error="stale_running_timeout")
+        if any(stats.values()):
+            METRICS.inc("jobs_reaped_total", sum(stats.values()))
+            self.update_queue_metrics()
+        return stats
+
+    def _reap_one(self, job_id: str, stats: dict[str, int], *, error: str) -> None:
+        if self._load(job_id) is None:
+            METRICS.inc("jobs_lost_total")
+            stats["lost"] += 1
+            return
+        outcome = self.fail_or_retry(job_id, error)
+        if outcome == "retried":
+            stats["requeued"] += 1
+        elif outcome == "dead":
+            stats["dead"] += 1
 
     def retry_size(self) -> int:
         return int(self._r.zcard(self._retry_key))
@@ -315,21 +475,34 @@ class RedisQueue:
     def dlq_requeue(self, job_id: str) -> bool:
         """把一个死信任务移回主队列(重置 attempts)。
 
-        **原子**:WATCH dlq → 确认 job 在 dlq → MULTI(lrem+hset+lpush)EXEC。避免"从 dlq 删除但
-        未回主队列"的丢失,也避免 lrem 删 0 却仍 hset/lpush(把非死信任务误入队)。
+        **原子 + 存在守卫**(P2-2):WATCH dlq+job hash → 确认 job 在 dlq **且 hash 仍含
+        question** → MULTI(lrem+hset+expire+lpush)EXEC。守住三个坑:
+        - "从 dlq 删除但未回主队列"的丢失;
+        - lrem 删 0 却仍 hset/lpush(非死信任务误入队);
+        - hash 已 TTL 蒸发时裸 hset 重建**无 question、无 TTL 的僵尸**并入队 ——
+          此时清掉悬空死信条目、计 jobs_lost_total、返回 False;正常路径重入队必补 TTL。
         """
         job_key = self._job_key(job_id)
         reset = {"status": QUEUED, "attempts": "0", "error": ""}
         with self._r.pipeline() as pipe:
             while True:
                 try:
-                    pipe.watch(self._dlq_key)
+                    pipe.watch(self._dlq_key, job_key)
                     if pipe.lpos(self._dlq_key, job_id) is None:
                         pipe.reset()
                         return False  # 不在 dlq
+                    if not pipe.hget(job_key, "question"):
+                        # hash 已蒸发/缺 question:重建即僵尸 → 清悬空条目,判 lost
+                        pipe.multi()
+                        pipe.lrem(self._dlq_key, 1, job_id)
+                        pipe.execute()
+                        METRICS.inc("jobs_lost_total")
+                        self.update_queue_metrics()
+                        return False
                     pipe.multi()
                     pipe.lrem(self._dlq_key, 1, job_id)
                     pipe.hset(job_key, mapping=reset)
+                    pipe.expire(job_key, self._job_ttl)  # 重入队续 TTL,防处理中蒸发
                     pipe.lpush(self._queue_key, job_id)
                     pipe.execute()
                     break

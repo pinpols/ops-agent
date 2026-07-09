@@ -1,5 +1,6 @@
 # worker(serve-worker):独立消费 Redis 队列 → 跑只读诊断 → 结果/重试/DLQ。
-# 无 Service(不收外部流量);崩溃/重启可恢复(状态在 Redis)。水平扩展安全(BRPOP 分发)。
+# 无 Service(不收外部流量);崩溃/重启可恢复(状态在 Redis)。水平扩展安全(BLMOVE 分发,
+# per-worker processing list + reaper 回收硬崩在途任务,见 ADR-0003)。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,8 +20,10 @@ spec:
         app: ops-agent
         component: worker
     spec:
-      # 滚动更新时给在途任务排空时间:worker 收 SIGTERM 后 stop+join(上限 ~10s)
-      terminationGracePeriodSeconds: 30
+      # 滚动更新时给在途任务排空时间:worker 收 SIGTERM 后 stop+join,排空窗口 =
+      # OPS_MAX_RUN_SECONDS(默认 120s)+ 收尾余量。grace period 必须 ≥ 该窗口,
+      # 否则 k8s 提前 SIGKILL,在途诊断卡 RUNNING(由 reaper 回收,但会多一次重试)。
+      terminationGracePeriodSeconds: 150
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

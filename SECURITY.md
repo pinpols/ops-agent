@@ -24,7 +24,9 @@
 - **只读优先**:触发层(`serve /diagnose`)注入"全拒"审批闸,危险执行需显式多重开关 + HITL。
 - **fail-closed 鉴权**:webhook 未配 token 即拒;生产 profile 强制最小权限只读 DB、日志只读挂载。
 - **脱敏**:出网内容与落库历史统一过 `redact_text`(token / DSN 口令 / JWT / 邮箱 / 手机号)。
-- **防注入**:工具输出包不可信围栏喂回 LLM;PromQL/SQL 走参数化 + scheme 校验。
+- **防注入**:工具输出包不可信围栏喂回 LLM;PromQL/SQL 走参数化 + scheme 校验;
+  webhook `question` 拒绝内嵌围栏定界符(**注意**:question 本身是未围栏指令通道,
+  告警模板禁止内嵌原始日志内容,日志取证应交由 agent 工具完成)。
 - **供应链门禁**(CI):`bandit` SAST、`pip-audit` 依赖漏洞、CycloneDX SBOM、gitleaks 秘钥扫描、
   Dependabot 自动依赖更新。
 

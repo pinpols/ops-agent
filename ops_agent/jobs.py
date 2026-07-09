@@ -13,8 +13,9 @@ from typing import Any
 
 from ops_agent.audit import audit_actor
 from ops_agent.budget import BudgetExceeded
-from ops_agent.callback import _callback_error, _post_callback
+from ops_agent.callback import _post_callback
 from ops_agent.metrics import METRICS
+from ops_agent.prompts import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
 
 logger = logging.getLogger("ops_agent.jobs")
 
@@ -52,6 +53,18 @@ def _validate_question_target(
     question = question.strip()
     if len(question) > _MAX_QUESTION_CHARS:
         return None, None, {"error": "question_too_long", "max_chars": _MAX_QUESTION_CHARS}
+    # P2-8:question 未过围栏直接进系统语境,是注入通道(设计边界,见 README/runbook:
+    # 告警模板禁止内嵌原始日志内容)。纵深防御:至少拒绝内嵌围栏定界符的 question ——
+    # 攻击者借它伪造"数据段结束"标记,把后续注入文字抬升为指令。
+    if UNTRUSTED_OPEN in question or UNTRUSTED_CLOSE in question:
+        return (
+            None,
+            None,
+            {
+                "error": "question_contains_fence_marker",
+                "detail": "question 不得包含不可信围栏定界符;请勿把日志原文塞进告警模板",
+            },
+        )
     target = payload.get("target")
     if target is None or target == "":
         return question, None, None
@@ -101,13 +114,11 @@ def diagnosis_job_handler(job: Any) -> dict[str, Any]:
 
     q = f"[target={job.target}] {job.question}" if job.target else job.question
     logger.info("开始处理诊断任务 job_id=%s trace_id=%s", job.id, job.trace_id)
-    try:
-        with audit_actor(getattr(job, "actor", None)):
-            diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
-    except Exception as exc:
-        # 失败也回调:否则配了 OPS_CALLBACK_URL 的下游永远等不到结果、不知任务已失败/进 DLQ。
-        _post_callback(job, status="failed", error=_callback_error(exc))
-        raise
+    # 失败回调不在这里投递(P2-3):每次重试 attempt 都会发 failed、之后又可能发 succeeded,
+    # 下游收到乱序终态信号。failed 只在**终局**(重试耗尽/不可重试判 dead)由队列层投递,
+    # payload 带最终 attempts;下游"等不到失败通知"的诉求由终局回调满足。
+    with audit_actor(getattr(job, "actor", None)):
+        diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
     result = {"trace_id": job.trace_id, "diagnosis": diagnosis.model_dump(mode="json")}
     _post_callback(job, status="succeeded", result=result)
     return result

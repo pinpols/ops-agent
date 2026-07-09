@@ -5,6 +5,10 @@
 
 配套告警规则:`deploy/prometheus/ops-agent-alerts.yml`。
 
+> **告警模板纪律(安全)**:接 Alertmanager/PagerDuty 时,`question` 只写人话问题描述
+> (如"worker-import 为什么失败"),**禁止把日志原文/annotation 里的原始输出内嵌进 question**——
+> question 不过不可信围栏,内嵌日志=给攻击者开注入通道;含围栏定界符的 question 会被 400 拒绝。
+
 ---
 
 ## 指标速查(前缀 `ops_agent_`)

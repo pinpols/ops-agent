@@ -55,7 +55,8 @@ def _safe(text: str) -> str:
 @tool
 def list_services() -> str:
     """列出目标系统中可诊断的服务、模块和日志文件。"""
-    return _list_services()
+    # 输出含目标仓的文件/目录名(不可信内容),与其余工具同姿态过 _safe(P2-1:曾是唯一漏网)
+    return _safe(_list_services())
 
 
 @tool
@@ -94,6 +95,19 @@ def query_pg(sql: str, max_rows: int = 50) -> str:
     return _safe(_query_pg(sql, max_rows))
 
 
+# 工具单一注册表:build_agent 与守护测试共用 —— 测试遍历它断言每个工具输出都过 _safe 围栏,
+# 新增工具漏包围栏会直接红(防再漂移,P2-1)。
+GRAPH_TOOLS = [
+    list_services,
+    tail_recent_errors,
+    inspect_compose,
+    read_app_config,
+    read_logs,
+    query_pg_template,
+    query_pg,
+]
+
+
 def build_agent():
     """构建 LangGraph react agent:模型 + 工具 + 系统提示 + 结构化输出 + 记忆(checkpointer)。"""
     from langchain_anthropic import ChatAnthropic
@@ -107,15 +121,7 @@ def build_agent():
     model = ChatAnthropic(model=get_settings().anthropic_model, max_tokens=1024)
     return create_react_agent(
         model,
-        tools=[
-            list_services,
-            tail_recent_errors,
-            inspect_compose,
-            read_app_config,
-            read_logs,
-            query_pg_template,
-            query_pg,
-        ],
+        tools=list(GRAPH_TOOLS),
         prompt=_SYSTEM_PROMPT,
         response_format=Diagnosis,  # 框架替你做"最后一步结构化输出"
         checkpointer=MemorySaver(),  # 框架替你做"记忆":同 thread_id 自动接上文

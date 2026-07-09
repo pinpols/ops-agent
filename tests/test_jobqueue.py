@@ -3,6 +3,7 @@
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from ops_agent.jobqueue import FAILED, QUEUED, SUCCEEDED, JobQueue
 
@@ -42,6 +43,47 @@ class JobQueueTest(unittest.TestCase):
             done = _wait(jq, job.id)
             self.assertEqual(done.status, FAILED)
             self.assertIn("nope", done.error)
+        finally:
+            jq.shutdown()
+
+    def test_final_failure_posts_single_failed_callback(self):
+        # P2-3:failed 回调只在终局投递一次(重试中不投,payload 可带最终 attempts)
+        calls = []
+
+        def boom(job):
+            raise RuntimeError("nope")
+
+        with patch(
+            "ops_agent.callback._post_callback",
+            side_effect=lambda job, **kw: calls.append((job, kw)),
+        ):
+            jq = JobQueue(boom, workers=1, max_retries=1, retry_base_seconds=0)
+            try:
+                job = jq.submit("x")
+                done = _wait(jq, job.id)
+                self.assertEqual(done.status, FAILED)
+                deadline = time.time() + 2
+                while time.time() < deadline and not calls:
+                    time.sleep(0.01)
+            finally:
+                jq.shutdown()
+        failed = [kw for _job, kw in calls if kw.get("status") == "failed"]
+        self.assertEqual(len(failed), 1)  # 共 2 次尝试,只在终局回调 1 次
+        self.assertEqual(calls[0][0].attempts, 2)
+
+    def test_non_retryable_exception_fails_without_retries(self):
+        # P2-4:BudgetExceeded 等确定性失败不重试,attempts 停在 1
+        from ops_agent.budget import BudgetExceeded
+
+        def boom(job):
+            raise BudgetExceeded("token 预算耗尽")
+
+        jq = JobQueue(boom, workers=1, max_retries=5, retry_base_seconds=0)
+        try:
+            job = jq.submit("x")
+            done = _wait(jq, job.id)
+            self.assertEqual(done.status, FAILED)
+            self.assertEqual(done.attempts, 1)
         finally:
             jq.shutdown()
 

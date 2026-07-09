@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ops_agent.budget import is_non_retryable
 from ops_agent.metrics import METRICS
 
 logger = logging.getLogger("ops_agent.jobqueue")
@@ -227,21 +228,26 @@ class JobQueue:
                 except Exception as exc:  # noqa: BLE001 - worker 边界:任务失败不拖垮 worker
                     logger.exception("诊断任务失败 job_id=%s trace_id=%s", job_id, job.trace_id)
                     retry_delay: float | None = None
+                    final_failure = False
                     with self._lock:
                         if job_id in self._jobs:
                             stored = self._jobs[job_id]
                             stored.attempts += 1
                             stored.error = f"{type(exc).__name__}: {exc}"
-                            if stored.attempts <= self._max_retries:
+                            # P2-4:确定性失败(预算耗尽/max_steps)不可重试,直接终局
+                            if stored.attempts <= self._max_retries and not is_non_retryable(exc):
                                 stored.status = QUEUED
                                 retry_delay = self._retry_delay(stored.attempts)
                                 METRICS.inc("jobs_retried_total")
                             else:
                                 stored.status = FAILED
                                 METRICS.inc("jobs_failed_total")
+                                final_failure = True
                     # 在锁外排重试 Timer(Lock 不可重入,且 delay=0 时 Timer 会立刻回调取锁)
                     if retry_delay is not None:
                         self._requeue_after_delay(job_id, retry_delay)
+                    if final_failure:
+                        self._notify_failed(job_id)  # P2-3:只在终局投递 failed(锁外,网络 IO)
                 finally:
                     elapsed = time.monotonic() - started
                     METRICS.observe("job_duration_seconds", elapsed, backend="memory")
@@ -249,6 +255,18 @@ class JobQueue:
             finally:
                 self._q.task_done()
                 self.update_queue_metrics()
+
+    def _notify_failed(self, job_id: str) -> None:
+        """终局失败回调(P2-3,best-effort):重试耗尽/不可重试才投递,payload 带最终 attempts。"""
+        job = self.get(job_id)
+        if job is None:
+            return
+        try:
+            from ops_agent.callback import _post_callback
+
+            _post_callback(job, status="failed", error=job.error)
+        except Exception as exc:  # noqa: BLE001 - 回调失败不影响任务状态机
+            logger.warning("终局失败回调投递异常 job_id=%s: %s", job_id, exc)
 
     def shutdown(self, timeout: float = 10.0) -> None:
         """置停并 join worker(排空在途)。挂起的重试 Timer 取消并把对应任务标终态。"""
