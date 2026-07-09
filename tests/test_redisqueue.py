@@ -205,6 +205,305 @@ class WorkerProcessOnceTest(unittest.TestCase):
         self.assertEqual(after, before + 1)
 
 
+class CrashSafeConsumeTest(unittest.TestCase):
+    """P1-1:consume 不再 BRPOP 破坏性出队,而是 LMOVE 到 per-worker processing list;
+    worker 硬崩(SIGKILL/OOM)后 reaper 从 processing 残留 + RUNNING 残留两处回收,不丢任务。"""
+
+    def _pair(self, **kw):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        return client, RedisQueue(client, worker_id="w1", **kw)
+
+    def test_consume_moves_to_processing_list(self):
+        client, rq = self._pair()
+        job = rq.submit("q")
+        got = rq.consume(timeout=1)
+        self.assertEqual(got, job.id)
+        self.assertEqual(rq.qsize(), 0)
+        # 出队即挂到本 worker 的 processing list(在途登记,崩溃可追溯)
+        self.assertEqual(client.lrange("ops:queue:processing:w1", 0, -1), [job.id])
+
+    def test_complete_removes_from_processing_list(self):
+        client, rq = self._pair()
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        rq.complete(job.id, {"ok": True})
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 0)
+
+    def test_fail_or_retry_removes_from_processing_list(self):
+        client, rq = self._pair(max_retries=1)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        self.assertEqual(rq.fail_or_retry(job.id, "boom"), "retried")
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 0)
+
+    def test_mark_running_records_running_since_and_worker(self):
+        client, rq = self._pair()
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        self.assertTrue(rq.mark_running(job.id))
+        h = client.hgetall(rq._job_key(job.id))
+        self.assertEqual(h["status"], RUNNING)
+        self.assertEqual(h["worker"], "w1")
+        self.assertGreater(float(h["running_since"]), 0)
+
+    def test_reaper_requeues_inflight_jobs_of_dead_worker(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        w1 = RedisQueue(client, worker_id="w1", max_retries=2)
+        job = w1.submit("q")
+        w1.consume(timeout=1)
+        w1.mark_running(job.id)
+        # w1 硬崩:没有 complete/fail,processing/RUNNING 双残留;w2(新 worker)启动后 reap
+        w2 = RedisQueue(client, worker_id="w2", max_retries=2)
+        stats = w2.reap(now=time.time() + 3600)  # 远超 worker_dead_after → w1 判死
+        self.assertEqual(stats["requeued"], 1)
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 0)
+        j = w2.get(job.id)
+        self.assertEqual(j.status, QUEUED)  # 回灌走 fail_or_retry:计入 attempts
+        self.assertEqual(j.attempts, 1)
+        self.assertEqual(w2.retry_size() + w2.qsize(), 1)  # 任务守恒:在 retry zset 或主队列
+
+    def test_reaper_spares_alive_worker(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        w1 = RedisQueue(client, worker_id="w1")
+        job = w1.submit("q")
+        w1.consume(timeout=1)  # consume 自带心跳
+        w1.mark_running(job.id)
+        w2 = RedisQueue(client, worker_id="w2")
+        stats = w2.reap(now=time.time())  # w1 心跳新鲜 → 不动它的在途任务
+        self.assertEqual(stats["requeued"], 0)
+        self.assertEqual(client.lrange("ops:queue:processing:w1", 0, -1), [job.id])
+        self.assertEqual(w2.get(job.id).status, RUNNING)
+
+    def test_reaper_recovers_stale_running_job_even_if_worker_alive(self):
+        # 心跳还在(进程活着)但单个任务卡死超 stale_running_seconds → 走 fail_or_retry 兜底
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq = RedisQueue(client, worker_id="w1", max_retries=2, stale_running_seconds=10)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        client.hset(rq._job_key(job.id), "running_since", str(time.time() - 3600))
+        stats = rq.reap(now=time.time())
+        self.assertEqual(stats["requeued"], 1)
+        self.assertEqual(rq.get(job.id).status, QUEUED)
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 0)  # 残留同步清掉
+
+    def test_reaper_counts_lost_for_ghost_id_in_dead_processing_list(self):
+        from ops_agent.metrics import METRICS
+
+        client = fakeredis.FakeRedis(decode_responses=True)
+        client.lpush("ops:queue:processing:dead-worker", "ghost")
+        rq = RedisQueue(client, worker_id="w2")
+        before = METRICS.snapshot().get(("jobs_lost_total", ()), 0)
+        stats = rq.reap(now=time.time() + 3600)
+        self.assertEqual(stats["lost"], 1)
+        after = METRICS.snapshot().get(("jobs_lost_total", ()), 0)
+        self.assertEqual(after, before + 1)
+        self.assertEqual(client.llen("ops:queue:processing:dead-worker"), 0)
+
+    def test_discard_removes_ghost_from_processing_list(self):
+        client, rq = self._pair()
+        client.lpush(rq._queue_key, "ghost")
+        rq.consume(timeout=1)
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 1)
+        rq.discard("ghost")
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 0)
+
+
+class PromoteAtomicityTest(unittest.TestCase):
+    """P1-2:promote_due_retries 的 zrem→lpush 必须原子;崩溃窗口不得丢任务。"""
+
+    def test_promote_survives_direct_lpush_failure(self):
+        # 旧实现:client.zrem 成功后 client.lpush 抛异常 → 任务从 zset 消失且没入队(永久丢失)。
+        # 新实现走 WATCH+MULTI 事务,不再裸调 client.lpush;任务守恒(要么在 zset 要么在队列)。
+        rq = _rq(max_retries=1)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        self.assertEqual(rq.fail_or_retry(job.id, "x"), "retried")
+        self.assertEqual(rq.retry_size(), 1)
+        with patch.object(rq._r, "lpush", side_effect=ConnectionError("redis down")):
+            promoted = rq.promote_due_retries(now=10**12)
+        self.assertEqual(promoted, 1)
+        self.assertEqual(rq.qsize() + rq.retry_size(), 1, "任务守恒被破坏:重试任务丢失")
+        self.assertEqual(rq.qsize(), 1)
+        self.assertIn(job.id, rq._r.lrange(rq._queue_key, 0, -1))
+
+
+class MarkRunningGuardTest(unittest.TestCase):
+    """P2-2:mark_running 裸 hset 会把已 TTL 过期的 job 重建成无 question 无 TTL 的僵尸。"""
+
+    def test_mark_running_missing_hash_counts_lost_and_creates_nothing(self):
+        from ops_agent.metrics import METRICS
+
+        rq = _rq()
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq._r.delete(rq._job_key(job.id))  # 模拟 TTL 过期/驱逐
+        before = METRICS.snapshot().get(("jobs_lost_total", ()), 0)
+        self.assertFalse(rq.mark_running(job.id))
+        after = METRICS.snapshot().get(("jobs_lost_total", ()), 0)
+        self.assertEqual(after, before + 1)
+        self.assertFalse(rq._r.exists(rq._job_key(job.id)))  # 不重建僵尸
+        self.assertEqual(rq._r.llen(rq._processing_key), 0)  # 在途登记同步清掉
+
+
+class DlqRequeueGuardTest(unittest.TestCase):
+    """P2-2:dlq_requeue 不校验 hash 存在/不补 TTL → 重建无 question 无 TTL 僵尸。"""
+
+    def _dead_job(self):
+        rq = _rq(max_retries=0)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        self.assertEqual(rq.fail_or_retry(job.id, "x"), "dead")
+        return rq, job
+
+    def test_dlq_requeue_missing_hash_returns_false_and_clears_entry(self):
+        rq, job = self._dead_job()
+        rq._r.delete(rq._job_key(job.id))  # hash 已 TTL 蒸发,只剩悬空死信条目
+        self.assertFalse(rq.dlq_requeue(job.id))
+        self.assertEqual(rq.qsize(), 0)  # 不把僵尸误入队
+        self.assertFalse(rq._r.exists(rq._job_key(job.id)))  # 不重建
+        self.assertEqual(rq.dlq_size(), 0)  # 悬空条目清理掉,不留永久假死信
+
+    def test_dlq_requeue_refreshes_ttl(self):
+        rq, job = self._dead_job()
+        rq._r.persist(rq._job_key(job.id))  # 模拟 TTL 已被剥离(接近过期的极端情形)
+        self.assertTrue(rq.dlq_requeue(job.id))
+        self.assertGreater(rq._r.ttl(rq._job_key(job.id)), 0)  # 重入队必须补 TTL
+        self.assertEqual(rq.get(job.id).question, "q")  # question 完整保留
+
+
+class NonRetryableFailTest(unittest.TestCase):
+    """P2-4(队列侧):retryable=False 直接判 dead 进 DLQ,不浪费重试预算。"""
+
+    def test_fail_or_retry_non_retryable_goes_straight_to_dlq(self):
+        rq = _rq(max_retries=5)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        outcome = rq.fail_or_retry(job.id, "BudgetExceeded: token 预算耗尽", retryable=False)
+        self.assertEqual(outcome, "dead")
+        self.assertEqual(rq.get(job.id).status, FAILED)
+        self.assertEqual(rq.dlq_size(), 1)
+        self.assertEqual(rq.retry_size(), 0)
+
+
+class TerminalCallbackTest(unittest.TestCase):
+    """P2-3:failed 回调只在终局(dead)投递 —— 否则下游先收 failed、之后又收 succeeded。"""
+
+    def test_failed_callback_only_on_terminal_dead(self):
+        rq = _rq(max_retries=1)
+        job = rq.submit("q")
+
+        def boom(j):
+            raise RuntimeError("x")
+
+        with patch("ops_agent.callback._post_callback") as cb:
+            self.assertEqual(process_once(rq, boom, timeout=1), "retried")
+            cb.assert_not_called()  # 中间重试不投递 failed
+            rq.promote_due_retries(now=10**12)
+            self.assertEqual(process_once(rq, boom, timeout=1), "dead")
+            cb.assert_called_once()  # 终局才投递
+            called_job = cb.call_args.args[0]
+            self.assertEqual(called_job.id, job.id)
+            self.assertEqual(called_job.attempts, 2)  # payload 带最终 attempts
+            self.assertEqual(cb.call_args.kwargs["status"], "failed")
+
+    def test_handler_no_longer_posts_failed_callback_midway(self):
+        # jobs.diagnosis_job_handler 不再在每次异常时回调;终局投递收口在队列层
+        from ops_agent.jobs import diagnosis_job_handler
+
+        job = type("J", (), {"id": "j1", "trace_id": "t1", "target": None, "question": "q"})()
+        with (
+            patch("ops_agent.agent.run_agent", side_effect=RuntimeError("boom")),
+            patch("ops_agent.callback._post_callback") as cb,
+        ):
+            with self.assertRaises(RuntimeError):
+                diagnosis_job_handler(job)
+        cb.assert_not_called()
+
+
+class NonRetryableWorkerTest(unittest.TestCase):
+    """P2-4:确定性失败(预算耗尽/max_steps 绕圈)直接 dead 进 DLQ,不烧重试预算。"""
+
+    def test_budget_exceeded_goes_straight_to_dlq(self):
+        from ops_agent.budget import BudgetExceeded
+
+        rq = _rq(max_retries=5)
+        job = rq.submit("q")
+
+        def boom(j):
+            raise BudgetExceeded("token 预算耗尽")
+
+        self.assertEqual(process_once(rq, boom, timeout=1), "dead")
+        self.assertEqual(rq.get(job.id).status, FAILED)
+        self.assertEqual(rq.dlq_size(), 1)
+        self.assertEqual(rq.retry_size(), 0)
+
+    def test_max_steps_exceeded_goes_straight_to_dlq(self):
+        from ops_agent.budget import MaxStepsExceeded
+
+        rq = _rq(max_retries=5)
+        rq.submit("q")
+
+        def boom(j):
+            raise MaxStepsExceeded("达到 max_steps=8 仍未得出结论")
+
+        self.assertEqual(process_once(rq, boom, timeout=1), "dead")
+        self.assertEqual(rq.dlq_size(), 1)
+
+    def test_plain_runtime_error_still_retries(self):
+        rq = _rq(max_retries=5)
+        rq.submit("q")
+
+        def boom(j):
+            raise RuntimeError("瞬时故障")
+
+        self.assertEqual(process_once(rq, boom, timeout=1), "retried")
+        self.assertEqual(rq.dlq_size(), 0)
+
+
+class WorkerLoopBackoffTest(unittest.TestCase):
+    """P2-5:Redis 断连时消费循环指数退避(响应 stop)+ 日志限频,不热旋不刷屏。"""
+
+    class _Stop:
+        """记录 wait 时长的假 stop event;waits 达上限后自动置停,终止循环。"""
+
+        def __init__(self, limit: int) -> None:
+            self.waits: list[float] = []
+            self._limit = limit
+            self._set = False
+
+        def is_set(self) -> bool:
+            return self._set
+
+        def wait(self, t: float) -> bool:
+            self.waits.append(t)
+            if len(self.waits) >= self._limit:
+                self._set = True
+            return self._set
+
+    def test_backoff_grows_and_is_capped(self):
+        rq = MagicMock()
+        rq.consume.side_effect = ConnectionError("redis down")
+        stop = self._Stop(limit=10)
+        with patch.object(worker_main.logger, "exception") as log_exc:
+            worker_main._worker_loop(rq, lambda j: {}, stop)
+        self.assertEqual(len(stop.waits), 10)
+        self.assertGreater(stop.waits[1], stop.waits[0])  # 指数增长
+        self.assertGreater(stop.waits[3], stop.waits[2])
+        self.assertLessEqual(max(stop.waits), worker_main._BACKOFF_MAX_SECONDS)  # 有上限
+        self.assertLess(log_exc.call_count, len(stop.waits))  # 日志限频:不是每次失败都记
+
+    def test_backoff_resets_after_success(self):
+        rq = MagicMock()
+        rq.consume.side_effect = [ConnectionError("down"), None, ConnectionError("down")]
+        stop = self._Stop(limit=2)
+        worker_main._worker_loop(rq, lambda j: {}, stop)
+        # 两次失败之间隔了一次成功 → 退避回到基准值,不累积
+        self.assertEqual(stop.waits[0], stop.waits[1])
+
+
 class WorkerRunLifecycleTest(unittest.TestCase):
     """覆盖此前完全未测的运维契约:run() 信号注册 → 心跳 → 优雅停机 → 资源释放。"""
 

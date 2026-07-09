@@ -13,7 +13,7 @@ from typing import Any
 
 from ops_agent.audit import audit_actor
 from ops_agent.budget import BudgetExceeded
-from ops_agent.callback import _callback_error, _post_callback
+from ops_agent.callback import _post_callback
 from ops_agent.metrics import METRICS
 
 logger = logging.getLogger("ops_agent.jobs")
@@ -101,13 +101,11 @@ def diagnosis_job_handler(job: Any) -> dict[str, Any]:
 
     q = f"[target={job.target}] {job.question}" if job.target else job.question
     logger.info("开始处理诊断任务 job_id=%s trace_id=%s", job.id, job.trace_id)
-    try:
-        with audit_actor(getattr(job, "actor", None)):
-            diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
-    except Exception as exc:
-        # 失败也回调:否则配了 OPS_CALLBACK_URL 的下游永远等不到结果、不知任务已失败/进 DLQ。
-        _post_callback(job, status="failed", error=_callback_error(exc))
-        raise
+    # 失败回调不在这里投递(P2-3):每次重试 attempt 都会发 failed、之后又可能发 succeeded,
+    # 下游收到乱序终态信号。failed 只在**终局**(重试耗尽/不可重试判 dead)由队列层投递,
+    # payload 带最终 attempts;下游"等不到失败通知"的诉求由终局回调满足。
+    with audit_actor(getattr(job, "actor", None)):
+        diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
     result = {"trace_id": job.trace_id, "diagnosis": diagnosis.model_dump(mode="json")}
     _post_callback(job, status="succeeded", result=result)
     return result

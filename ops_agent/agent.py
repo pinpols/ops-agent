@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from ops_agent.audit import append_approval_record, append_execution_record
-from ops_agent.budget import BudgetExceeded, RunBudget
+from ops_agent.budget import BudgetExceeded, MaxStepsExceeded, RunBudget
 from ops_agent.config import Settings, get_settings
 from ops_agent.diagnose import _TOOL_NAME as REPORT_TOOL_NAME
 from ops_agent.diagnose import _build_tool as build_report_tool
@@ -271,7 +271,10 @@ def run_agent(
 
     METRICS.inc("diagnose_max_steps_total")
     _flush_metrics(settings)
-    raise RuntimeError(f"达到 max_steps={max_steps} 仍未得出结论(可能在绕圈,检查工具/prompt)")
+    # MaxStepsExceeded ∈ 不可重试闭集(P2-4):绕圈是确定性失败,worker 直接判 dead 不重试
+    raise MaxStepsExceeded(
+        f"达到 max_steps={max_steps} 仍未得出结论(可能在绕圈,检查工具/prompt)"
+    )
 
 
 def _flush_metrics(settings: Settings) -> None:

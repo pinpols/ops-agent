@@ -1,7 +1,8 @@
 """独立 worker 进程(架构演进 Step 2):消费 Redis 队列 → 跑诊断 → 写结果 / 重试 / DLQ。
 
 与 ingress(`serve`)解耦的独立进程,可起多份做水平扩展;崩溃/重启可恢复(状态在 Redis)。
-进程内再起 `OPS_WORKER_COUNT` 个消费线程提升单进程并发。SIGINT/SIGTERM 优雅停机。
+进程内再起 `OPS_WORKER_COUNT` 个消费线程提升单进程并发,外加一个 reaper 线程
+(P1-1:回收硬崩 worker 的在途任务)。SIGINT/SIGTERM 优雅停机,排空窗口覆盖单次 run 预算。
 """
 
 import logging
@@ -11,11 +12,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ops_agent.budget import is_non_retryable
 from ops_agent.config import Settings, get_settings
 from ops_agent.queue_backend import WorkerQueue
 from ops_agent.redisqueue import RedisQueue
 
 logger = logging.getLogger("ops_agent.worker")
+
+_BACKOFF_BASE_SECONDS = 0.5
+_BACKOFF_MAX_SECONDS = 30.0
 
 
 def build_redis_queue(settings: Settings) -> RedisQueue:
@@ -30,13 +35,17 @@ def process_once(rq: WorkerQueue, handler: Any, timeout: int = 1) -> str | None:
     job = rq.get(job_id)
     if job is None:
         # 取到了 job_id 但 hash 已不在(TTL 过期/被驱逐)→ 任务丢失。出队即静默跳过会"无声丢单",
-        # 必须留痕 + 计指标,便于告警/排查。
+        # 必须留痕 + 计指标 + 清 processing 登记(否则幽灵 id 永挂在途),便于告警/排查。
         from ops_agent.metrics import METRICS
 
         logger.warning("job_id=%s 出队但 hash 缺失(TTL过期/驱逐),丢弃", job_id)
         METRICS.inc("jobs_lost_total")
+        discard = getattr(rq, "discard", None)
+        if discard is not None:
+            discard(job_id)
         return None
-    rq.mark_running(job_id)
+    if not rq.mark_running(job_id):
+        return None  # hash 在 get 与 mark 之间蒸发(P2-2 守卫已计 lost + 清登记)
     from ops_agent.metrics import METRICS
 
     METRICS.add("workers_busy", 1, backend="redis")  # 在途 worker 数(利用率分子)
@@ -47,8 +56,17 @@ def process_once(rq: WorkerQueue, handler: Any, timeout: int = 1) -> str | None:
         rq.complete(job_id, result)
         return "succeeded"
     except Exception as exc:  # noqa: BLE001 - worker 边界:失败转重试/DLQ,不崩线程
-        outcome = rq.fail_or_retry(job_id, f"{type(exc).__name__}: {exc}")
-        logger.warning("job %s trace_id=%s 失败 → %s: %s", job_id, job.trace_id, outcome, exc)
+        # P2-4:确定性失败(预算耗尽/max_steps 绕圈)重试注定同样结局,直接判 dead 进 DLQ
+        retryable = not is_non_retryable(exc)
+        outcome = rq.fail_or_retry(job_id, f"{type(exc).__name__}: {exc}", retryable=retryable)
+        logger.warning(
+            "job %s trace_id=%s 失败(retryable=%s)→ %s: %s",
+            job_id,
+            job.trace_id,
+            retryable,
+            outcome,
+            exc,
+        )
         return outcome
     finally:
         METRICS.observe("job_duration_seconds", time.monotonic() - started, backend="redis")
@@ -67,15 +85,46 @@ def _touch_heartbeat(path: Path | None) -> None:
 
 
 def _worker_loop(rq: WorkerQueue, handler: Any, stop: threading.Event) -> None:
+    """消费循环。循环自身异常(如 Redis 断连)不终结 worker,但要**指数退避 + 日志限频**
+    (P2-5):否则断连期间每秒热旋重连打满 CPU、异常栈刷爆日志。退避用 stop.wait 实现,
+    停机信号能立刻打断等待。"""
+    failures = 0
     while not stop.is_set():
         try:
             process_once(rq, handler, timeout=1)
+            failures = 0
         except Exception:  # noqa: BLE001 - 消费循环自身异常(如 Redis 抖动)不该终结 worker
-            logger.exception("worker 循环异常,继续")
+            failures += 1
+            delay = min(_BACKOFF_MAX_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** (failures - 1)))
+            # 日志限频:前 3 次全记(保留现场),之后每 10 次记 1 条(断连风暴不刷日志)
+            if failures <= 3 or failures % 10 == 0:
+                logger.exception("worker 循环异常(连续 %d 次),%.1fs 后重试", failures, delay)
+            stop.wait(delay)
+
+
+def _reaper_loop(rq: Any, stop: threading.Event, interval: float) -> None:
+    """崩溃回收循环(P1-1):启动先 reap 一次(接管上任 worker 的遗留),之后周期扫。"""
+    failures = 0
+    while not stop.is_set():
+        try:
+            stats = rq.reap()
+            failures = 0
+            if isinstance(stats, dict) and any(stats.values()):
+                logger.warning(
+                    "reaper 回收:requeued=%s dead=%s lost=%s",
+                    stats.get("requeued"),
+                    stats.get("dead"),
+                    stats.get("lost"),
+                )
+        except Exception:  # noqa: BLE001 - reaper 异常不终结 worker,下一轮重试
+            failures += 1
+            if failures <= 3 or failures % 10 == 0:
+                logger.exception("reaper 异常(连续 %d 次)", failures)
+        stop.wait(interval)
 
 
 def run(settings: Settings | None = None) -> None:
-    """启动 worker:N 个消费线程 + 信号优雅停机(阻塞直到收到停止信号)。"""
+    """启动 worker:N 个消费线程 + reaper + 信号优雅停机(阻塞直到收到停止信号)。"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = settings or get_settings()
     rq = build_redis_queue(settings)
@@ -94,6 +143,14 @@ def run(settings: Settings | None = None) -> None:
         )
         for i in range(worker_count)
     ]
+    # reaper:启动即回收上任 worker 硬崩遗留的在途任务,并周期性兜底(P1-1)
+    threads.append(
+        threading.Thread(
+            target=_reaper_loop,
+            args=(rq, stop, max(1.0, settings.ops_reaper_interval_seconds)),
+            name="reaper",
+        )
+    )
     for t in threads:
         t.start()
     logger.info("worker 启动:threads=%d queue=%s", len(threads), settings.ops_queue_key)
@@ -104,8 +161,12 @@ def run(settings: Settings | None = None) -> None:
             stop.wait(1)
     finally:
         stop.set()
+        # 优雅排空:窗口覆盖单次 run 预算(OPS_MAX_RUN_SECONDS)+ 收尾余量,配合
+        # k8s terminationGracePeriodSeconds(deploy/k8s/worker.yaml)≥ 该窗口;
+        # 旧值 join(10s) 会在在途诊断(可长至 120s)没跑完时就退出,任务卡 RUNNING。
+        deadline = time.monotonic() + settings.ops_max_run_seconds + 10
         for t in threads:
-            t.join(timeout=10)
+            t.join(timeout=max(0.1, deadline - time.monotonic()))
         rq.close()
         logger.info("worker 优雅退出")
 

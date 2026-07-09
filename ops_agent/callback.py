@@ -44,11 +44,17 @@ def _post_callback(
         return
     import urllib.request
 
+    # prod 下 error 字段集中脱敏(异常文本可能含路径/DSN 等内部细节),与 _callback_error 同姿态;
+    # 保留异常类别前缀便于下游归类。
+    if error and settings.production:
+        error = error.split(":", 1)[0] + ": callback_error"
     body = json.dumps(
         {
             "job_id": job.id,
             "trace_id": job.trace_id,
             "status": status,
+            # 终局回调带 attempts(P2-3):下游可区分"首试成功"与"重试 N 次后死掉"
+            "attempts": getattr(job, "attempts", None),
             "result": result,
             "error": error,
         }

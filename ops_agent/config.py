@@ -98,6 +98,10 @@ class Settings:
     ops_queue_depth_alert_threshold: int = 0
     # worker 心跳文件:run 循环每秒 touch;k8s liveness exec 探针据 mtime 判存活(检出僵死)。
     ops_worker_heartbeat_file: Path | None = None
+    # 崩溃回收(reaper,P1-1):Redis 心跳超时判 worker 死 / RUNNING 卡死阈值 / reaper 周期。
+    ops_worker_dead_after_seconds: float = 60.0
+    ops_stale_running_seconds: float = 240.0  # 未显式配置时 from_env 派生为 2×max_run_seconds
+    ops_reaper_interval_seconds: float = 30.0
 
     @property
     def langfuse_enabled(self) -> bool:
@@ -125,6 +129,7 @@ class Settings:
                 "拒绝静默降级为 dev,以免 prod 安全闸被绕过。"
             )
         model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
+        max_run_seconds = float(os.environ.get("OPS_MAX_RUN_SECONDS", "120"))
         target_root = (
             Path(os.environ["OPS_TARGET_ROOT"]).resolve()
             if os.environ.get("OPS_TARGET_ROOT")
@@ -165,7 +170,7 @@ class Settings:
             langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
             langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
             ops_webhook_token=_env_or_file("OPS_WEBHOOK_TOKEN"),
-            ops_max_run_seconds=float(os.environ.get("OPS_MAX_RUN_SECONDS", "120")),
+            ops_max_run_seconds=max_run_seconds,
             ops_max_run_tokens=int(os.environ.get("OPS_MAX_RUN_TOKENS", "200000")),
             ops_metrics_file=(
                 Path(os.environ["OPS_METRICS_FILE"]).resolve()
@@ -201,6 +206,16 @@ class Settings:
             ),
             ops_queue_depth_alert_threshold=int(
                 os.environ.get("OPS_QUEUE_DEPTH_ALERT_THRESHOLD", "0")
+            ),
+            ops_worker_dead_after_seconds=float(
+                os.environ.get("OPS_WORKER_DEAD_AFTER_SECONDS", "60")
+            ),
+            # RUNNING 卡死阈值:默认 2× 单次 run 预算(留足重试/收尾余量),可显式覆盖
+            ops_stale_running_seconds=float(
+                os.environ.get("OPS_STALE_RUNNING_SECONDS", str(max_run_seconds * 2))
+            ),
+            ops_reaper_interval_seconds=float(
+                os.environ.get("OPS_REAPER_INTERVAL_SECONDS", "30")
             ),
         )
 

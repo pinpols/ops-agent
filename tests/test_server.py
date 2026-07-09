@@ -295,6 +295,52 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
         self.assertEqual(received[1]["error"], "RuntimeError: boom")
 
 
+class CallbackPayloadTest(unittest.TestCase):
+    def test_callback_body_includes_attempts(self):
+        # P2-3:终局回调 payload 带 attempts,下游能区分"重试几次后死掉"
+        captured = {}
+
+        def fake_urlopen(req, timeout=10):
+            captured["body"] = json.loads(req.data)
+
+            class _R:
+                def close(self):
+                    return None
+
+            return _R()
+
+        job = SimpleNamespace(id="j1", trace_id="t1", attempts=3)
+        with (
+            patch.dict(os.environ, {"OPS_CALLBACK_URL": "http://127.0.0.1:9/cb"}, clear=False),
+            patch("urllib.request.urlopen", fake_urlopen),
+        ):
+            callback._post_callback(job, status="failed", error="RuntimeError: boom")
+        self.assertEqual(captured["body"]["attempts"], 3)
+        self.assertEqual(captured["body"]["status"], "failed")
+
+    def test_prod_callback_error_field_is_sanitized_centrally(self):
+        # prod 下 failed 回调的 error 字段集中脱敏(不泄内部细节),与 _callback_error 同姿态
+        sent = {}
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "OPS_PROFILE": "prod",
+                    "OPS_CALLBACK_URL": "https://1.1.1.1/cb",
+                    "OPS_CALLBACK_ALLOW_HOSTS": "1.1.1.1",
+                },
+                clear=True,
+            ),
+            patch(
+                "ops_agent.callback._post_https_callback_pinned",
+                side_effect=lambda url, body: sent.update(body=json.loads(body)),
+            ),
+        ):
+            job = SimpleNamespace(id="j1", trace_id="t1", attempts=1)
+            callback._post_callback(job, status="failed", error="RuntimeError: dsn=password secret")
+        self.assertEqual(sent["body"]["error"], "RuntimeError: callback_error")
+
+
 class CallbackPolicyTest(unittest.TestCase):
     def test_dev_allows_loopback_http_for_local_tests(self):
         with patch.dict("os.environ", {"OPS_PROFILE": "dev"}, clear=True):
