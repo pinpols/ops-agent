@@ -311,6 +311,187 @@ class CrashSafeConsumeTest(unittest.TestCase):
         self.assertEqual(client.llen("ops:queue:processing:w1"), 0)
 
 
+class MarkRunningTerminalGuardTest(unittest.TestCase):
+    """P1-2:job 被 reaper 抢走重入队、原 worker 已写 SUCCEEDED 后,第二个 worker 取到
+    同 id 时 mark_running 不得把终态改回 RUNNING 重跑。"""
+
+    def test_mark_running_refuses_succeeded_job(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq = RedisQueue(client, worker_id="w1")
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        rq.complete(job.id, {"ok": True})
+        # 重复投递:同 id 再次被消费(reaper 抢走后重入队的迟到副本)
+        client.lpush(rq._queue_key, job.id)
+        got = rq.consume(timeout=1)
+        self.assertEqual(got, job.id)
+        self.assertFalse(rq.mark_running(job.id))  # 终态不回翻
+        self.assertEqual(rq.get(job.id).status, SUCCEEDED)
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 0)  # 在途登记同步摘除
+
+    def test_mark_running_refuses_failed_job(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq = RedisQueue(client, worker_id="w1", max_retries=0)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.fail_or_retry(job.id, "boom")  # 直接终局 FAILED
+        client.lpush(rq._queue_key, job.id)
+        rq.consume(timeout=1)
+        self.assertFalse(rq.mark_running(job.id))
+        self.assertEqual(rq.get(job.id).status, FAILED)
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 0)
+
+    def test_process_once_skips_terminal_job_without_running_handler(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq = RedisQueue(client, worker_id="w1")
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.complete(job.id, {"ok": True})
+        client.lpush(rq._queue_key, job.id)
+        calls = []
+        self.assertIsNone(process_once(rq, lambda j: calls.append(j) or {}, timeout=1))
+        self.assertEqual(calls, [])  # handler 没被重跑
+        self.assertEqual(rq.get(job.id).result, {"ok": True})  # 结果没被覆写
+
+
+class SucceededCallbackOrderingTest(unittest.TestCase):
+    """P1-3:succeeded 回调必须在 complete 确认"本方是第一个终态写入者"之后才投递;
+    complete 被终态守卫拒绝(如 reaper 已判 FAILED)时,绝不能给下游发 succeeded。"""
+
+    def test_complete_returns_true_only_on_first_terminal_write(self):
+        rq = _rq()
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        self.assertTrue(rq.complete(job.id, {"ok": True}))
+        self.assertFalse(rq.complete(job.id, {"ok": 2}))  # 已终态 → 拒绝
+
+    def test_complete_returns_false_when_already_failed(self):
+        rq = _rq(max_retries=0)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        rq.fail_or_retry(job.id, "reaper 判死")  # 另一方先写了 FAILED
+        self.assertFalse(rq.complete(job.id, {"ok": True}))
+        self.assertEqual(rq.get(job.id).status, FAILED)  # 不覆写
+
+    def test_succeeded_callback_after_complete_wins(self):
+        rq = _rq()
+        job = rq.submit("q")
+        with patch("ops_agent.callback._post_callback") as cb:
+            outcome = process_once(rq, lambda j: {"echo": j.question}, timeout=1)
+        self.assertEqual(outcome, "succeeded")
+        succeeded = [c for c in cb.call_args_list if c.kwargs.get("status") == "succeeded"]
+        self.assertEqual(len(succeeded), 1)
+        self.assertEqual(succeeded[0].args[0].id, job.id)
+
+    def test_no_succeeded_callback_when_complete_rejected(self):
+        # handler 跑完前任务已被另一方判 FAILED(reaper 抢走后终局)→ 不发 succeeded
+        rq = _rq(max_retries=0)
+        job = rq.submit("q")
+
+        def handler(j):
+            # 模拟 handler 长跑期间另一方(reaper/另一 worker)把任务判成 FAILED
+            rq.fail_or_retry(j.id, "stale_running_timeout")
+            return {"ok": True}
+
+        with patch("ops_agent.callback._post_callback") as cb:
+            process_once(rq, handler, timeout=1)
+        succeeded = [c for c in cb.call_args_list if c.kwargs.get("status") == "succeeded"]
+        self.assertEqual(succeeded, [])  # 乱序终态信号被堵住
+        self.assertEqual(rq.get(job.id).status, FAILED)
+
+
+class ReaperHeartbeatRaceTest(unittest.TestCase):
+    """P0-1:心跳模型 —— 忙 worker(心跳持续续、但不 consume)不得被判死;
+    reaper 判死后回收前须二次确认心跳仍 stale,drain 中途心跳复活要立刻停手。"""
+
+    def test_busy_worker_with_fresh_heartbeat_not_reaped(self):
+        # 模拟忙 worker:handler 长跑期间不 consume,但独立心跳线程持续续心跳
+        client = fakeredis.FakeRedis(decode_responses=True)
+        w1 = RedisQueue(client, worker_id="w1", max_retries=2)
+        job = w1.submit("q")
+        w1.consume(timeout=1)
+        w1.mark_running(job.id)
+        w1.heartbeat()  # 心跳线程在续(即便 consume 不再被调)
+        w2 = RedisQueue(client, worker_id="w2", max_retries=2)
+        stats = w2.reap(now=time.time())
+        self.assertEqual(stats["requeued"], 0)
+        self.assertEqual(client.lrange("ops:queue:processing:w1", 0, -1), [job.id])
+        self.assertIsNotNone(client.zscore("ops:queue:workers", "w1"))  # 心跳没被 zrem
+
+    def test_truly_dead_worker_still_reaped(self):
+        # 心跳停了(真死)→ 照常回收
+        client = fakeredis.FakeRedis(decode_responses=True)
+        w1 = RedisQueue(client, worker_id="w1", max_retries=2)
+        job = w1.submit("q")
+        w1.consume(timeout=1)
+        w1.mark_running(job.id)
+        client.zadd("ops:queue:workers", {"w1": time.time() - 3600})  # 心跳停更
+        w2 = RedisQueue(client, worker_id="w2", max_retries=2)
+        stats = w2.reap(now=time.time())
+        self.assertEqual(stats["requeued"], 1)
+        self.assertIsNone(client.zscore("ops:queue:workers", "w1"))
+
+    def test_reaper_stops_draining_when_heartbeat_revives_mid_drain(self):
+        # 判死后 drain 过程中 w1 心跳恢复 → 停止抢夺剩余在途任务,且不 zrem 其心跳
+        client = fakeredis.FakeRedis(decode_responses=True)
+        w1 = RedisQueue(client, worker_id="w1", max_retries=2)
+        j1 = w1.submit("a")
+        j2 = w1.submit("b")
+        w1.consume(timeout=1)
+        w1.consume(timeout=1)
+        w1.mark_running(j1.id)
+        w1.mark_running(j2.id)
+        client.zadd("ops:queue:workers", {"w1": time.time() - 3600})  # 先呈 stale
+        w2 = RedisQueue(client, worker_id="w2", max_retries=2)
+        real_rpop = client.rpop
+
+        def rpop_and_revive(key, *a, **kw):
+            out = real_rpop(key, *a, **kw)
+            client.zadd("ops:queue:workers", {"w1": time.time()})  # w1 恢复心跳
+            return out
+
+        client.rpop = rpop_and_revive
+        try:
+            stats = w2.reap(now=time.time())
+        finally:
+            client.rpop = real_rpop
+        self.assertEqual(stats["requeued"], 1)  # 只抢走了复活前的那一个
+        self.assertEqual(client.llen("ops:queue:processing:w1"), 1)  # 剩余在途没被抢
+        self.assertIsNotNone(client.zscore("ops:queue:workers", "w1"))  # 心跳没被 zrem
+
+
+class WorkerHeartbeatThreadTest(unittest.TestCase):
+    """P0-1①:独立心跳线程 —— handler 忙跑 120s 时 consume 不会被调,心跳必须独立续。"""
+
+    def test_heartbeat_loop_renews_periodically_until_stop(self):
+        rq = MagicMock()
+        stop = threading.Event()
+        t = threading.Thread(target=worker_main._heartbeat_loop, args=(rq, stop, 0.01), daemon=True)
+        t.start()
+        deadline = time.time() + 2
+        while time.time() < deadline and rq.heartbeat.call_count < 3:
+            time.sleep(0.01)
+        stop.set()
+        t.join(timeout=1)
+        self.assertGreaterEqual(rq.heartbeat.call_count, 3)
+
+    def test_heartbeat_loop_survives_redis_errors(self):
+        rq = MagicMock()
+        rq.heartbeat.side_effect = ConnectionError("redis down")
+        stop = threading.Event()
+        t = threading.Thread(target=worker_main._heartbeat_loop, args=(rq, stop, 0.01), daemon=True)
+        t.start()
+        deadline = time.time() + 2
+        while time.time() < deadline and rq.heartbeat.call_count < 2:
+            time.sleep(0.01)
+        stop.set()
+        t.join(timeout=1)
+        self.assertGreaterEqual(rq.heartbeat.call_count, 2)  # 异常不终结心跳线程
+
+
 class PromoteAtomicityTest(unittest.TestCase):
     """P1-2:promote_due_retries 的 zrem→lpush 必须原子;崩溃窗口不得丢任务。"""
 
@@ -463,6 +644,232 @@ class NonRetryableWorkerTest(unittest.TestCase):
         self.assertEqual(rq.dlq_size(), 0)
 
 
+class OptionalRedisDependencyTest(unittest.TestCase):
+    """P3:模块 docstring 承诺 redis 是可选依赖、仅延迟 import —— 顶层 WatchError import
+    会让未装 redis 的 memory 后端环境 import 本模块即炸。"""
+
+    def test_module_import_does_not_require_redis(self):
+        import importlib
+        import sys
+
+        saved = {
+            name: sys.modules.pop(name)
+            for name in list(sys.modules)
+            if name == "redis" or name.startswith("redis.")
+        }
+        # sys.modules 里塞 None → import 该名字立刻 ImportError(标准阻断手法)
+        sys.modules["redis"] = None  # type: ignore[assignment]
+        sys.modules["redis.exceptions"] = None  # type: ignore[assignment]
+        try:
+            import ops_agent.redisqueue as rq_mod
+
+            importlib.reload(rq_mod)  # redis 不可用时模块本身仍可 import
+        finally:
+            for name in ("redis", "redis.exceptions"):
+                sys.modules.pop(name, None)
+            sys.modules.update(saved)
+            import ops_agent.redisqueue as rq_mod
+
+            importlib.reload(rq_mod)  # 恢复真实模块状态,别污染后续测试
+
+
+class CloseCleanupTest(unittest.TestCase):
+    """P3:close() 摘除自己的心跳 —— 否则优雅退出的 worker 心跳残留到 dead_after 过期,
+    期间 reaper 都把它当'活着',推迟对其残留的判定。"""
+
+    def test_close_removes_own_heartbeat(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq = RedisQueue(client, worker_id="w1")
+        rq.heartbeat()
+        self.assertIsNotNone(client.zscore("ops:queue:workers", "w1"))
+        rq.close()
+        self.assertIsNone(client.zscore("ops:queue:workers", "w1"))
+
+
+class QueueAuditTrailTest(unittest.TestCase):
+    """P2-8:dlq_requeue 与 reaper 回灌/判死写入 audit hash chain(本地链,无网络依赖)。"""
+
+    def _rq_with_audit(self, tmp, **kw):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        return client, RedisQueue(
+            client, worker_id="w2", audit_log=Path(tmp) / "approvals.jsonl", **kw
+        )
+
+    def _records(self, tmp):
+        import json
+
+        path = Path(tmp) / "approvals.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(x) for x in path.read_text().splitlines()]
+
+    def test_dlq_requeue_writes_queue_requeue_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client, rq = self._rq_with_audit(tmp, max_retries=0)
+            job = rq.submit("q")
+            rq.consume(timeout=1)
+            rq.fail_or_retry(job.id, "boom")  # 直接进 DLQ
+            self.assertTrue(rq.dlq_requeue(job.id))
+            records = [r for r in self._records(tmp) if r.get("type") == "queue"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["event"], "QUEUE_REQUEUE")
+        self.assertEqual(records[0]["job_id"], job.id)
+        self.assertEqual(records[0]["outcome"], "requeued")
+        self.assertIn("hash", records[0])  # 走同一条 hash chain
+
+    def test_reaper_writes_queue_reap_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client, rq = self._rq_with_audit(tmp, max_retries=2)
+            w1 = RedisQueue(client, worker_id="w1", max_retries=2)
+            job = w1.submit("q")
+            w1.consume(timeout=1)
+            w1.mark_running(job.id)
+            client.zadd("ops:queue:workers", {"w1": time.time() - 3600})
+            stats = rq.reap(now=time.time())
+            self.assertEqual(stats["requeued"], 1)
+            records = [r for r in self._records(tmp) if r.get("type") == "queue"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["event"], "QUEUE_REAP")
+        self.assertEqual(records[0]["job_id"], job.id)
+        self.assertEqual(records[0]["outcome"], "retried")
+        self.assertIn("worker_crashed:w1", records[0]["detail"])
+
+    def test_audit_failure_does_not_break_queue_ops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client, rq = self._rq_with_audit(tmp, max_retries=0)
+            rq._audit_log = Path("/proc/definitely/not/writable/a.jsonl")
+            job = rq.submit("q")
+            rq.consume(timeout=1)
+            rq.fail_or_retry(job.id, "boom")
+            self.assertTrue(rq.dlq_requeue(job.id))  # 审计失败不影响队列状态机
+
+    def test_from_settings_wires_audit_log(self):
+        import os
+        from unittest.mock import patch as _patch
+
+        from ops_agent.config import Settings
+
+        env = {
+            "OPS_QUEUE_BACKEND": "redis",
+            "OPS_REDIS_URL": "redis://localhost:6/0",
+            "OPS_APPROVAL_LOG": "/tmp/x/approvals.jsonl",
+        }
+        with (
+            _patch.dict(os.environ, env, clear=True),
+            _patch("redis.from_url", return_value=fakeredis.FakeRedis(decode_responses=True)),
+        ):
+            rq = RedisQueue.from_settings(Settings.from_env())
+        # macOS 下 /tmp 解析为 /private/tmp,故用后缀断言
+        self.assertTrue(str(rq._audit_log).endswith("/tmp/x/approvals.jsonl"))
+
+
+class ConcurrentReapGuardTest(unittest.TestCase):
+    """P2-5①:两个 reaper 同窗回收同一 stale RUNNING job → fail_or_retry 双执行、
+    attempts 双增。守卫:带 expected_running_since 的调用仅当仍 RUNNING 且
+    running_since 未变才执行。"""
+
+    def _stale_running_job(self, client):
+        rq = RedisQueue(client, worker_id="w1", max_retries=5, stale_running_seconds=10)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        client.hset(rq._job_key(job.id), "running_since", str(time.time() - 3600))
+        return rq, job
+
+    def test_fail_or_retry_skips_when_running_since_changed(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq, job = self._stale_running_job(client)
+        observed = client.hget(rq._job_key(job.id), "running_since")
+        # 第一个 reaper 先回收成功(同一观测值)
+        self.assertEqual(
+            rq.fail_or_retry(job.id, "stale", expected_running_since=observed), "retried"
+        )
+        self.assertEqual(rq.get(job.id).attempts, 1)
+        # 第二个 reaper 拿着同一份旧观测值迟到 → 必须跳过,attempts 不双增
+        rq2 = RedisQueue(client, worker_id="w2", max_retries=5, stale_running_seconds=10)
+        self.assertEqual(
+            rq2.fail_or_retry(job.id, "stale", expected_running_since=observed), "skipped"
+        )
+        self.assertEqual(rq2.get(job.id).attempts, 1)
+        self.assertEqual(rq2.retry_size() + rq2.qsize(), 1)  # 没被双份入队
+
+    def test_fail_or_retry_skips_when_job_remarked_running_by_new_worker(self):
+        # 回收间隙任务已被新 worker 领走重跑(running_since 变新)→ 旧观测值失效,跳过
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq, job = self._stale_running_job(client)
+        observed = client.hget(rq._job_key(job.id), "running_since")
+        rq.mark_running(job.id)  # 新一轮执行:running_since 刷新
+        self.assertEqual(
+            rq.fail_or_retry(job.id, "stale", expected_running_since=observed), "skipped"
+        )
+        self.assertEqual(rq.get(job.id).status, RUNNING)  # 在跑的不被打断
+
+    def test_reap_stale_running_still_works_end_to_end(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq, job = self._stale_running_job(client)
+        stats = rq.reap(now=time.time())
+        self.assertEqual(stats["requeued"], 1)
+        self.assertEqual(rq.get(job.id).status, QUEUED)
+
+
+class MetricsFlushTest(unittest.TestCase):
+    """P1-4①:complete/finally/reaper 里更新的指标发生在 run_agent 内部 flush 之后 ——
+    消费循环与 reaper 每轮结束必须 flush textfile,空闲 worker 也要周期 flush。"""
+
+    def test_worker_loop_flushes_metrics_even_when_idle(self):
+        rq = MagicMock()
+        rq.consume.return_value = None  # 空闲:无任务
+
+        class _Stop:
+            def __init__(self):
+                self.n = 0
+
+            def is_set(self):
+                return self.n >= 3
+
+            def wait(self, t):
+                return False
+
+        stop = _Stop()
+        real = rq.consume
+
+        def consume(timeout=1):
+            stop.n += 1
+            return real(timeout=timeout)
+
+        rq.consume = consume
+        with tempfile.TemporaryDirectory() as tmp:
+            mf = Path(tmp) / "metrics.prom"
+            worker_main._worker_loop(rq, lambda j: {}, stop, metrics_file=mf)
+            self.assertTrue(mf.exists())  # 空闲轮也落盘
+            self.assertIn("ops_agent", mf.read_text())
+
+    def test_reaper_loop_flushes_metrics_each_round(self):
+        rq = MagicMock()
+        stop = threading.Event()
+        rq.reap.side_effect = lambda: (stop.set(), {"requeued": 1, "dead": 0, "lost": 0})[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            mf = Path(tmp) / "metrics.prom"
+            worker_main._reaper_loop(rq, stop, 0.01, metrics_file=mf)
+            self.assertTrue(mf.exists())
+
+    def test_flush_metrics_file_tolerates_write_errors(self):
+        # 只读路径 → 不抛,不崩循环
+        worker_main._flush_metrics_file(Path("/proc/definitely/not/writable/x.prom"))
+
+    def test_reap_one_records_lost_outcome_from_fail_or_retry(self):
+        # P1-4③:fail_or_retry 返回 lost(hash 在 _load 与 fail_or_retry 之间蒸发)时
+        # stats 不得漏记
+        rq = _rq()
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        stats = {"requeued": 0, "dead": 0, "lost": 0}
+        with patch.object(rq, "fail_or_retry", return_value="lost"):
+            rq._reap_one(job.id, stats, error="worker_crashed:w1")
+        self.assertEqual(stats["lost"], 1)
+
+
 class WorkerLoopBackoffTest(unittest.TestCase):
     """P2-5:Redis 断连时消费循环指数退避(响应 stop)+ 日志限频,不热旋不刷屏。"""
 
@@ -536,6 +943,11 @@ class WorkerRunLifecycleTest(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertIn(signal.SIGTERM, handlers)  # 注册了优雅停机
                 self.assertTrue(os.path.exists(hb))  # 心跳被 touch(liveness 依赖)
+                # P0-1:独立心跳线程在续 Redis 心跳(consume 被 mock,不会间接触发)
+                deadline2 = time.time() + 3
+                while time.time() < deadline2 and fake_rq.heartbeat.call_count < 1:
+                    time.sleep(0.02)
+                fake_rq.heartbeat.assert_called()
                 handlers[signal.SIGTERM](signal.SIGTERM, None)  # 触发 SIGTERM
                 t.join(timeout=5)
                 self.assertFalse(t.is_alive())  # run() 优雅退出

@@ -1,0 +1,31 @@
+# PodDisruptionBudget(P2-9):自愿中断(节点排空 kubectl drain / 集群升级 / descheduler)
+# 时保证 ingress 与 worker 至少各存活 1 副本 —— 否则一次 drain 可同时打掉全部副本:
+# ingress 全灭=告警 webhook 入口 5xx;worker 全灭=队列堆积、在途任务等 reaper 多付一次重试。
+# 两个 Deployment 默认 replicas=2,minAvailable: 1 允许逐个迁移、不阻塞节点维护。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ops-agent-ingress
+  labels:
+    app: ops-agent
+    component: ingress
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ops-agent
+      component: ingress
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ops-agent-worker
+  labels:
+    app: ops-agent
+    component: worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ops-agent
+      component: worker

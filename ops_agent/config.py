@@ -1,8 +1,11 @@
 """Centralized runtime configuration for ops-agent."""
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger("ops_agent.config")
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 # 合法 profile 闭集。profile 决定 prod fail-closed 闸 + 自由 SQL 默认值,
@@ -104,8 +107,8 @@ class Settings:
     # 同步 /diagnose 并发闸(P2-7):超限回 429,防并发 webhook 内联跑 LLM 拖垮进程。
     ops_sync_max_concurrent: int = 4
     # 崩溃回收(reaper,P1-1):Redis 心跳超时判 worker 死 / RUNNING 卡死阈值 / reaper 周期。
-    ops_worker_dead_after_seconds: float = 60.0
-    ops_stale_running_seconds: float = 240.0  # 未显式配置时 from_env 派生为 2×max_run_seconds
+    ops_worker_dead_after_seconds: float = 300.0  # from_env 派生 max_run+llm_timeout+60
+    ops_stale_running_seconds: float = 360.0  # from_env 派生 max_run+llm_timeout+120
     ops_reaper_interval_seconds: float = 30.0
 
     @property
@@ -135,6 +138,23 @@ class Settings:
             )
         model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
         max_run_seconds = float(os.environ.get("OPS_MAX_RUN_SECONDS", "120"))
+        llm_timeout_seconds = float(os.environ.get("OPS_LLM_TIMEOUT_SECONDS", str(max_run_seconds)))
+        # P0-1②:dead_after 默认派生 —— 必须覆盖"handler 忙跑 max_run + LLM 超时"的合法最坏
+        # 窗口(+60s 余量),否则忙 worker 被对面 reaper 判死、在途任务被抢走造成双执行。
+        worker_dead_after_seconds = float(
+            os.environ.get(
+                "OPS_WORKER_DEAD_AFTER_SECONDS",
+                str(max_run_seconds + llm_timeout_seconds + 60),
+            )
+        )
+        if worker_dead_after_seconds <= max_run_seconds:
+            logger.warning(
+                "OPS_WORKER_DEAD_AFTER_SECONDS=%.0f ≤ OPS_MAX_RUN_SECONDS=%.0f:"
+                "忙 worker 单个 handler 就可能跑满 run 预算,判死窗口小于它会让 reaper "
+                "抢走在途任务造成双执行;建议 ≥ max_run + llm_timeout + 60",
+                worker_dead_after_seconds,
+                max_run_seconds,
+            )
         target_root = (
             Path(os.environ["OPS_TARGET_ROOT"]).resolve()
             if os.environ.get("OPS_TARGET_ROOT")
@@ -212,16 +232,16 @@ class Settings:
             ops_queue_depth_alert_threshold=int(
                 os.environ.get("OPS_QUEUE_DEPTH_ALERT_THRESHOLD", "0")
             ),
-            ops_llm_timeout_seconds=float(
-                os.environ.get("OPS_LLM_TIMEOUT_SECONDS", str(max_run_seconds))
-            ),
+            ops_llm_timeout_seconds=llm_timeout_seconds,
             ops_sync_max_concurrent=int(os.environ.get("OPS_SYNC_MAX_CONCURRENT", "4")),
-            ops_worker_dead_after_seconds=float(
-                os.environ.get("OPS_WORKER_DEAD_AFTER_SECONDS", "60")
-            ),
-            # RUNNING 卡死阈值:默认 2× 单次 run 预算(留足重试/收尾余量),可显式覆盖
+            ops_worker_dead_after_seconds=worker_dead_after_seconds,
+            # RUNNING 卡死阈值(P2-5②):旧默认 2×max_run 可能小于合法最坏
+            # (run 预算 + LLM 单次超时 + 工具收尾);默认派生 max_run+llm_timeout+120,可显式覆盖
             ops_stale_running_seconds=float(
-                os.environ.get("OPS_STALE_RUNNING_SECONDS", str(max_run_seconds * 2))
+                os.environ.get(
+                    "OPS_STALE_RUNNING_SECONDS",
+                    str(max_run_seconds + llm_timeout_seconds + 120),
+                )
             ),
             ops_reaper_interval_seconds=float(os.environ.get("OPS_REAPER_INTERVAL_SECONDS", "30")),
         )

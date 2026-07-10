@@ -1,12 +1,18 @@
 """审计写入 + 按大小滚动留存单测。"""
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from ops_agent.audit import _record_hash, append_approval_record, append_execution_record
+from ops_agent.audit import (
+    _record_hash,
+    append_approval_record,
+    append_execution_record,
+    append_queue_record,
+)
 
 
 class AuditTest(unittest.TestCase):
@@ -51,6 +57,30 @@ class AuditTest(unittest.TestCase):
             persisted_hash = record.pop("hash")
             self.assertEqual(persisted_hash, _record_hash(record))
         self.assertNotIn("gho_SECRET123", repr(records))
+
+    def test_append_queue_record_chains_and_carries_event(self):
+        # P2-8:队列运维动作(DLQ 回灌 / reaper 判死回收)进同一条 hash chain
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "approvals.jsonl"
+            append_queue_record(
+                path, event="QUEUE_REQUEUE", job_id="j1", outcome="requeued", actor="oncall"
+            )
+            append_queue_record(
+                path, event="QUEUE_REAP", job_id="j2", outcome="retried", detail="worker_crashed:w1"
+            )
+            lines = [json.loads(x) for x in path.read_text().splitlines()]
+        first, second = lines
+        self.assertEqual(first["type"], "queue")
+        self.assertEqual(first["event"], "QUEUE_REQUEUE")
+        self.assertEqual(first["job_id"], "j1")
+        self.assertEqual(first["actor"], "oncall")
+        self.assertEqual(second["event"], "QUEUE_REAP")
+        self.assertEqual(second["detail"], "worker_crashed:w1")
+        self.assertIsNone(first["prev_hash"])
+        self.assertEqual(second["prev_hash"], first["hash"])  # 链上
+        for record in lines:
+            persisted_hash = record.pop("hash")
+            self.assertEqual(persisted_hash, _record_hash(record))
 
     def test_rotation_when_over_size(self):
         with TemporaryDirectory() as tmp:

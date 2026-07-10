@@ -4,12 +4,41 @@
 trace 与 bundle 会记录当时的 (model, PROMPT_VERSION),回归对比时能定位"是哪版 prompt 导致分数变化"。
 """
 
+import re
+
 # 改 _AGENT_SYSTEM 文案 → 必须同步 bump 这里。CI eval 用它标注基线。
 PROMPT_VERSION = "1.4.0"  # 1.4.0: 加 Flink 写工具(cancel/savepoint,危险/需审批,默认 dry-run)
 
 # 工具返回内容回喂 LLM 时的不可信数据围栏标记。系统 prompt 明确:围栏内一律是数据、非指令。
 UNTRUSTED_OPEN = "<<<UNTRUSTED_TOOL_OUTPUT"
 UNTRUSTED_CLOSE = "UNTRUSTED_TOOL_OUTPUT>>>"
+
+# P2-7:围栏标记匹配不能是精确子串 —— 攻击者用大小写变体、零宽/格式字符插入
+# (ZWSP/ZWJ/BOM/soft-hyphen 等,渲染不可见)或全角尖括号即可绕过精确匹配,
+# 而模型在语义上仍可能把变体当围栏边界。匹配统一走"变体感知"正则:
+# 每个标记字符间允许任意格式字符,尖括号接受全角等价,忽略大小写。
+# bandit B613:双向/格式控制字符一律用显式转义写出,源码中不出现字面不可见字符
+_FORMAT_CHARS = (
+    "\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180e\u200b-\u200f"
+    "\u202a-\u202e\u2060-\u2064\u206a-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0"
+)
+_FORMAT_GAP = f"[{_FORMAT_CHARS}]*"
+_CONFUSABLES = {"<": "[<＜‹〈]", ">": "[>＞›〉]", "_": "[_＿]"}
+
+
+def _marker_regex(marker: str) -> "re.Pattern[str]":
+    parts = [_CONFUSABLES.get(ch, re.escape(ch)) for ch in marker]
+    return re.compile(_FORMAT_GAP.join(parts), re.IGNORECASE)
+
+
+_OPEN_MARKER_RE = _marker_regex(UNTRUSTED_OPEN)
+_CLOSE_MARKER_RE = _marker_regex(UNTRUSTED_CLOSE)
+
+
+def contains_fence_marker(text: str) -> bool:
+    """文本里是否出现围栏开/闭标记(含大小写/零宽插入/全角尖括号变体)。输入侧校验用。"""
+    return bool(_OPEN_MARKER_RE.search(text) or _CLOSE_MARKER_RE.search(text))
+
 
 AGENT_SYSTEM = (
     "你是资深 SRE。工具:list_services(列服务)、tail_recent_errors(扫近期异常)、"
@@ -42,8 +71,11 @@ def fence_untrusted(text: str) -> str:
 
     **防围栏逃逸**:攻击者可控的日志内容若混入围栏闭标记,模型可能误判'数据段结束'、把后续
     注入文字当指令。喂入前把文本里出现的开/闭标记中和掉(替换成可见占位),确保围栏不可被内容破坏。
+    P2-7:中和用变体感知正则(大小写/零宽插入/全角尖括号同样中和),与输入侧
+    `contains_fence_marker` 同一套归一逻辑,防两侧漂移。
     """
-    safe = text.replace(UNTRUSTED_CLOSE, "U_T_O_>>>").replace(UNTRUSTED_OPEN, "<<<_U_T_O")
+    safe = _CLOSE_MARKER_RE.sub("U_T_O_>>>", text)
+    safe = _OPEN_MARKER_RE.sub("<<<_U_T_O", safe)
     return f"{UNTRUSTED_OPEN}\n{safe}\n{UNTRUSTED_CLOSE}"
 
 

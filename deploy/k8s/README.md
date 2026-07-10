@@ -47,9 +47,28 @@ kubectl get deploy,po,hpa -l app.kubernetes.io/part-of=ops-agent
 
 - **Redis HA**:`redis.yaml` 是单实例起步级。生产用托管 Redis 或 Sentinel/Cluster(单点宕=队列不可用)。
 - **镜像发布**:默认清单使用版本 tag,不是 `latest`;正式生产 overlay 应改为 digest,并配合镜像签名/准入策略。
-- **抓指标**:worker 无 HTTP,需把 `OPS_METRICS_FILE` 用 node_exporter textfile collector 或 sidecar 暴露;ingress 已带 `prometheus.io/scrape` 注解。告警规则:`deploy/prometheus/ops-agent-alerts.yml`。
+- **抓指标**:见下节「worker 指标抓取」;ingress 已带 `prometheus.io/scrape` 注解。告警规则:`deploy/prometheus/ops-agent-alerts.yml`。
 - **NetworkPolicy overlay**:默认只放行公网 HTTPS;若 LLM gateway、Prometheus 或只读 DB 在私网,需按精确 CIDR/selector 增补 egress。
 - **机密管理**:用 External Secrets/Vault,别用仓库里的示例 Secret。
 - **目标系统挂载**:若诊断对象日志/配置在集群外,按需挂 PV 或改走远端只读访问。
+
+## worker 指标抓取(必配,否则指标黑洞)
+
+worker 进程无 HTTP 端口,`OPS_METRICS_FILE`(默认 `/var/run/ops-agent/metrics.prom`)
+写在 `runtime` 卷里。**默认 emptyDir 没有任何抓取方** —— jobs_succeeded/reaped/lost、
+workers_busy 等队列指标写了等于没写,必须按下面二选一接上:
+
+1. **node_exporter textfile collector(hostPath)**:把 worker.yaml 的 `runtime` 卷改成
+   hostPath,指向节点上 node_exporter `--collector.textfile.directory` 的目录
+   (worker.yaml volumes 段有现成注释示例)。注意:
+   - 需要集群允许 hostPath(PodSecurity `privileged` namespace 或 OPA 白名单);
+   - 同节点多 worker Pod 会写同一文件,用 `OPS_METRICS_FILE=/…/$(POD_NAME).prom` 区分;
+   - node_exporter 会给指标自动带上节点标签,Pod 维度靠文件名/自定义 label 区分。
+2. **sidecar exporter**:worker Pod 内加一个只读挂 `runtime` 卷的轻量 HTTP 容器
+   (nginx 静态托管 metrics.prom 即可),Pod 加 `prometheus.io/scrape: "true"` 注解,
+   Prometheus 按 Pod 抓取。无节点权限要求,Pod 维度天然隔离,代价是每 Pod 多一个容器。
+
+worker 侧已保证 textfile 时效性:消费循环与 reaper **每轮结束都会 flush**(含空闲轮),
+不再只依赖诊断 run 内部的 flush 时机。
 
 排障见 `docs/runbook/queue-operations.md`。

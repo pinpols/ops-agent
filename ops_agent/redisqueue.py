@@ -28,9 +28,9 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from redis.exceptions import WatchError
-
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ops_agent.config import Settings
 
 from ops_agent.jobqueue import FAILED, QUEUED, RUNNING, SUCCEEDED, DiagnosisJob
@@ -65,6 +65,7 @@ class RedisQueue:
         worker_id: str | None = None,
         worker_dead_after_seconds: float = 60.0,
         stale_running_seconds: float = 240.0,
+        audit_log: "Path | None" = None,
     ) -> None:
         self._r = client
         self._queue_key = queue_key
@@ -83,6 +84,8 @@ class RedisQueue:
         self._workers_key = f"{queue_key}:workers"
         self._worker_dead_after_seconds = max(1.0, worker_dead_after_seconds)
         self._stale_running_seconds = max(1.0, stale_running_seconds)
+        # P2-8:队列运维动作(DLQ 回灌/reaper 回收)审计链;未配则不留痕(测试/嵌入场景)
+        self._audit_log = audit_log
 
     @classmethod
     def from_url(cls, url: str, **kwargs: Any) -> "RedisQueue":
@@ -108,6 +111,7 @@ class RedisQueue:
             queue_depth_alert_threshold=settings.ops_queue_depth_alert_threshold,
             worker_dead_after_seconds=settings.ops_worker_dead_after_seconds,
             stale_running_seconds=settings.ops_stale_running_seconds,
+            audit_log=settings.ops_approval_log,
         )
 
     # ── 序列化 ────────────────────────────────────────────────
@@ -171,6 +175,8 @@ class RedisQueue:
         )
         job_key = self._job_key(job.id)
         mapping = self._mapping(job)
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -246,15 +252,31 @@ class RedisQueue:
 
         **存在守卫**(P2-2):hash 已 TTL 过期/驱逐时,裸 hset 会重建一个无 question、
         无 TTL 的僵尸 —— 这里判 lost(计 jobs_lost_total)并清 processing 登记,不执行。
+
+        **终态守卫**(P1-2):job 被 reaper 抢走重入队、原 worker 已写 SUCCEEDED/FAILED 后,
+        第二个 worker 取到同 id —— 旧实现只查存在性,会把终态改回 RUNNING 重跑;
+        这里遇终态即清 processing 登记并返回 False(调用方跳过执行)。
         """
         key = self._job_key(job_id)
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
                     pipe.watch(key)
-                    if not pipe.exists(key):
+                    status = pipe.hget(key, "status")
+                    if status is None:
                         pipe.unwatch()
                         METRICS.inc("jobs_lost_total")
+                        self.discard(job_id)
+                        return False
+                    if status in (SUCCEEDED, FAILED):
+                        pipe.unwatch()
+                        logger.warning(
+                            "mark_running 拒绝已终态任务 job_id=%s status=%s(重复投递副本,跳过)",
+                            job_id,
+                            status,
+                        )
                         self.discard(job_id)
                         return False
                     pipe.multi()
@@ -271,13 +293,18 @@ class RedisQueue:
                 except WatchError:
                     continue
 
-    def complete(self, job_id: str, result: dict) -> None:
+    def complete(self, job_id: str, result: dict) -> bool:
         """标记成功。**原子 + 终态守卫**:WATCH 状态 → 仅当未终态/未丢失才写。
 
         避免迟到的 complete 覆写一个已被(重复投递的)另一 worker 写成 FAILED 的 job,
         也避免在 hash 已 TTL 过期后用 hset 重建一个无 question/无 TTL 的僵尸。
+
+        返回是否**真正写入了 SUCCEEDED**(P1-3):调用方据此决定要不要投递 succeeded
+        回调 —— 被守卫拒绝时本方不是第一个终态写入者,发 succeeded 会给下游乱序终态。
         """
         key = self._job_key(job_id)
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -286,7 +313,7 @@ class RedisQueue:
                     if status is None or status in (SUCCEEDED, FAILED):
                         pipe.unwatch()
                         self.discard(job_id)  # 在途登记别悬空
-                        return  # 哈希已丢失 / 已终态 → 不覆写、不复活
+                        return False  # 哈希已丢失 / 已终态 → 不覆写、不复活
                     pipe.multi()
                     pipe.hset(
                         key,
@@ -299,9 +326,22 @@ class RedisQueue:
                     continue
         METRICS.inc("jobs_succeeded_total")
         self.update_queue_metrics()
+        return True
 
-    def fail_or_retry(self, job_id: str, error: str, *, retryable: bool = True) -> str:
+    def fail_or_retry(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        retryable: bool = True,
+        expected_running_since: str | None = None,
+    ) -> str:
         """失败处理:未超上限 → 重入队('retried');超限或不可重试 → DLQ('dead');哈希丢失 → 'lost'。
+
+        **并发回收守卫**(P2-5①):传 `expected_running_since`(reaper 观测到的值)时,
+        仅当任务仍 RUNNING 且 running_since 未变才执行,否则返回 'skipped' ——
+        两个 reaper 同窗回收同一 stale job 时只有一个生效,attempts 不双增、不双入队;
+        任务已被新 worker 领走重跑(running_since 刷新)时也不误伤。
 
         **原子 + 终态/存在守卫**(WATCH/MULTI):
         - 旧实现 `hincrby` 在 hash 已 TTL 过期时会**重建一个无 TTL、丢了 question 的僵尸 job**
@@ -313,6 +353,8 @@ class RedisQueue:
         不浪费重试预算重复烧钱。终局失败(dead)才投递 failed 回调(P2-3)。
         """
         key = self._job_key(job_id)
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -327,6 +369,11 @@ class RedisQueue:
                         pipe.unwatch()
                         self.discard(job_id)
                         return "dead" if status == FAILED else "succeeded"  # 已终态,不重处理
+                    if expected_running_since is not None:
+                        current = pipe.hget(key, "running_since")
+                        if status != RUNNING or current != expected_running_since:
+                            pipe.unwatch()
+                            return "skipped"  # 已被别的 reaper 回收 / 已被新 worker 领走
                     attempts = int(pipe.hget(key, "attempts") or 0) + 1
                     if retryable and attempts <= self._max_retries:
                         retry_after = time.time() + self._retry_delay(attempts)
@@ -388,6 +435,8 @@ class RedisQueue:
         并发 worker 同扫时 WATCH 冲突方重试,不会双份入队。
         """
         now = time.time() if now is None else now
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -424,16 +473,23 @@ class RedisQueue:
             wid = key[len(self._processing_prefix) :]
             if wid == self._worker_id:
                 continue  # 自己的在途由自己收口
-            score = self._r.zscore(self._workers_key, wid)
-            if score is not None and now - float(score) < self._worker_dead_after_seconds:
+            if self._worker_alive(wid, now):
                 continue  # 心跳新鲜,worker 活着
+            # P0-1③:判死后、每次回收前都再核对心跳 —— 缩小"worker 只是忙/刚复活"的竞态窗,
+            # 也防 drain 循环把复活 worker 新领的任务一并抢走。
+            revived = False
             while True:
+                if self._worker_alive(wid, now):
+                    revived = True
+                    logger.warning("reaper 中止回收:worker=%s 心跳已恢复", wid)
+                    break
                 job_id = self._r.rpop(key)
                 if job_id is None:
                     break
                 logger.warning("reaper 回收死 worker=%s 在途任务 job_id=%s", wid, job_id)
                 self._reap_one(job_id, stats, error=f"worker_crashed:{wid}")
-            self._r.zrem(self._workers_key, wid)
+            if not revived:
+                self._r.zrem(self._workers_key, wid)
         # ② RUNNING 卡死兜底(含 worker 活着但任务卡死/心跳键丢失等)
         for jkey in list(self._r.scan_iter(match=_JOB_PREFIX + "*")):
             status, running_since, worker = self._r.hmget(jkey, "status", "running_since", "worker")
@@ -445,22 +501,43 @@ class RedisQueue:
             if worker:
                 self._r.lrem(self._processing_prefix + worker, 1, job_id)
             logger.warning("reaper 回收 RUNNING 卡死任务 job_id=%s worker=%s", job_id, worker)
-            self._reap_one(job_id, stats, error="stale_running_timeout")
+            # P2-5①:带上观测到的 running_since —— 并发 reaper 只有一个能真正回收
+            self._reap_one(
+                job_id, stats, error="stale_running_timeout", expected_running_since=running_since
+            )
         if any(stats.values()):
             METRICS.inc("jobs_reaped_total", sum(stats.values()))
             self.update_queue_metrics()
         return stats
 
-    def _reap_one(self, job_id: str, stats: dict[str, int], *, error: str) -> None:
+    def _worker_alive(self, wid: str, now: float) -> bool:
+        score = self._r.zscore(self._workers_key, wid)
+        return score is not None and now - float(score) < self._worker_dead_after_seconds
+
+    def _reap_one(
+        self,
+        job_id: str,
+        stats: dict[str, int],
+        *,
+        error: str,
+        expected_running_since: str | None = None,
+    ) -> None:
         if self._load(job_id) is None:
             METRICS.inc("jobs_lost_total")
             stats["lost"] += 1
             return
-        outcome = self.fail_or_retry(job_id, error)
+        outcome = self.fail_or_retry(job_id, error, expected_running_since=expected_running_since)
         if outcome == "retried":
             stats["requeued"] += 1
         elif outcome == "dead":
             stats["dead"] += 1
+        elif outcome == "lost":
+            # hash 在上面 _load 与 fail_or_retry 之间蒸发(P1-4③):jobs_lost_total 已由
+            # fail_or_retry 计数,这里补 stats,否则 reaper 日志/汇总漏报丢单
+            stats["lost"] += 1
+        if outcome != "skipped":
+            # P2-8:reaper 改变任务命运(回灌/判死/丢失)要留审计痕;skipped=没动它,不记
+            self._audit_queue_event("QUEUE_REAP", job_id, outcome, detail=error)
 
     def retry_size(self) -> int:
         return int(self._r.zcard(self._retry_key))
@@ -484,6 +561,8 @@ class RedisQueue:
         """
         job_key = self._job_key(job_id)
         reset = {"status": QUEUED, "attempts": "0", "error": ""}
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -509,10 +588,28 @@ class RedisQueue:
                 except WatchError:
                     continue
         self.update_queue_metrics()
+        self._audit_queue_event("QUEUE_REQUEUE", job_id, "requeued")  # P2-8:DLQ 回灌留痕
         return True
+
+    def _audit_queue_event(
+        self, event: str, job_id: str, outcome: str, detail: str | None = None
+    ) -> None:
+        """队列运维动作写审计 hash chain(P2-8,best-effort:审计失败不影响队列状态机)。"""
+        if self._audit_log is None:
+            return
+        try:
+            from ops_agent.audit import append_queue_record
+
+            append_queue_record(
+                self._audit_log, event=event, job_id=job_id, outcome=outcome, detail=detail
+            )
+        except Exception as exc:  # noqa: BLE001 - 审计尽力而为,不阻断回收/回灌
+            logger.warning("队列审计写入失败 event=%s job_id=%s: %s", event, job_id, exc)
 
     def close(self) -> None:
         import contextlib
 
+        with contextlib.suppress(Exception):  # P3:优雅退出摘除自己的心跳,别让 reaper
+            self._r.zrem(self._workers_key, self._worker_id)  # 在 dead_after 窗口内误当活 worker
         with contextlib.suppress(Exception):  # 关闭尽力而为
             self._r.close()

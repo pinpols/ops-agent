@@ -13,6 +13,7 @@ resources:
   - ingress.yaml     # serve Deployment + Service + HPA
   - worker.yaml      # serve-worker Deployment + HPA
   - networkpolicy.yaml
+  - pdb.yaml         # 自愿中断预算:ingress/worker 各至少保 1 副本
 
 # 真部署常见覆盖(放到 overlay 里):
 #   images:

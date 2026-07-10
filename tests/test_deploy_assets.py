@@ -50,6 +50,32 @@ def test_k8s_default_images_do_not_use_latest_tag() -> None:
                 assert not image.endswith(":latest"), f"{path} uses mutable latest image tag"
 
 
+def test_worker_metrics_scrape_paths_are_documented() -> None:
+    # P1-4②:OPS_METRICS_FILE 落在 emptyDir 无人抓取 → README 与 worker.yaml 必须
+    # 写清两种接法(node_exporter textfile hostPath / sidecar exporter)
+    readme = (K8S_DIR / "README.md").read_text(encoding="utf-8")
+    assert "node_exporter" in readme and "sidecar" in readme
+    assert "OPS_METRICS_FILE" in readme
+    worker = (K8S_DIR / "worker.yaml").read_text(encoding="utf-8")
+    assert "hostPath" in worker  # volumes 段给出 textfile collector 接法示例
+    assert "OPS_METRICS_FILE" in worker
+
+
+def test_pdb_protects_ingress_and_worker() -> None:
+    # P2-9:节点排空/滚动升级时 ingress 与 worker 至少各保 1 副本,防止入口/消费全灭
+    docs = _load_yaml_documents(K8S_DIR / "pdb.yaml")
+    pdbs = {doc["metadata"]["name"]: doc for doc in docs if doc["kind"] == "PodDisruptionBudget"}
+    assert set(pdbs) == {"ops-agent-ingress", "ops-agent-worker"}
+    for name, doc in pdbs.items():
+        assert doc["apiVersion"] == "policy/v1"
+        assert doc["spec"]["minAvailable"] == 1, name
+        labels = doc["spec"]["selector"]["matchLabels"]
+        assert labels["app"] == "ops-agent"
+        assert labels["component"] in {"ingress", "worker"}
+    kustomization = _load_yaml_documents(K8S_DIR / "kustomization.yaml")[0]
+    assert "pdb.yaml" in kustomization["resources"]  # 别忘了挂进 apply 清单
+
+
 def test_prometheus_alerts_are_parseable_and_actionable() -> None:
     rules_file = PROM_DIR / "ops-agent-alerts.yml"
     alert_config = _load_yaml_documents(rules_file)[0]

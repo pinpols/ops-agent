@@ -160,18 +160,26 @@ class JobQueue:
         with self._lock:
             if self._stop.is_set():
                 # 停机竞态:不再排注定丢失的 Timer,直接标终态,避免任务永久卡 QUEUED
-                self._mark_failed_locked(job_id, "shutdown_retry_cancelled")
-                return
-            self._timers[timer] = job_id
+                cancelled = self._mark_failed_locked(job_id, "shutdown_retry_cancelled")
+            else:
+                self._timers[timer] = job_id
+                cancelled = None
+        if cancelled is not None:
+            if cancelled:
+                self._notify_failed(job_id)  # P2-6:dead 路径同样要发终局 failed(锁外)
+            return
         timer.start()
 
-    def _mark_failed_locked(self, job_id: str, error: str) -> None:
-        """在持锁状态下把非终态任务标记 FAILED(给查询端点一个确定终态)。"""
+    def _mark_failed_locked(self, job_id: str, error: str) -> bool:
+        """持锁把非终态任务标记 FAILED(给查询端点一个确定终态)。返回是否真发生了状态翻转
+        (已终态的任务返回 False,调用方据此避免重复回调/重复计数)。"""
         job = self._jobs.get(job_id)
         if job is not None and job.status not in (SUCCEEDED, FAILED):
             job.status = FAILED
             job.error = error
             METRICS.inc("jobs_failed_total")
+            return True
+        return False
 
     def _requeue(self, job_id: str) -> None:
         if self._stop.is_set():
@@ -182,12 +190,10 @@ class JobQueue:
         except queue.Full:
             logger.warning("重试入队失败:队列已满 job_id=%s", job_id)
             with self._lock:
-                job = self._jobs.get(job_id)
-                if job is not None:
-                    job.status = FAILED
-                    job.error = "retry_queue_full"
-            METRICS.inc("jobs_failed_total")
+                failed = self._mark_failed_locked(job_id, "retry_queue_full")
             self.update_queue_metrics()
+            if failed:
+                self._notify_failed(job_id)  # P2-6:终局 dead,必须给下游失败通知
 
     def _evict_locked(self) -> None:
         # 结果缓存上限:超出则从最旧开始淘汰(已 succeeded/failed 优先,但简化为 FIFO)。
@@ -220,11 +226,16 @@ class JobQueue:
                 started = time.monotonic()
                 try:
                     result = self._handler(job)
+                    completed = False
                     with self._lock:
                         if job_id in self._jobs:
                             self._jobs[job_id].result = result
                             self._jobs[job_id].status = SUCCEEDED
+                            completed = True
                     METRICS.inc("jobs_succeeded_total")
+                    if completed:
+                        # P1-3:succeeded 回调在终态写入后由队列层投递(与 redis 后端一致)
+                        self._notify(job_id, status="succeeded", result=result)
                 except Exception as exc:  # noqa: BLE001 - worker 边界:任务失败不拖垮 worker
                     logger.exception("诊断任务失败 job_id=%s trace_id=%s", job_id, job.trace_id)
                     retry_delay: float | None = None
@@ -261,24 +272,43 @@ class JobQueue:
         job = self.get(job_id)
         if job is None:
             return
+        self._notify(job_id, status="failed", error=job.error)
+
+    def _notify(
+        self, job_id: str, *, status: str, result: dict | None = None, error: str | None = None
+    ) -> None:
+        """终态回调统一投递口(best-effort,锁外调用,回调失败不影响任务状态机)。"""
+        job = self.get(job_id)
+        if job is None:
+            return
         try:
             from ops_agent.callback import _post_callback
 
-            _post_callback(job, status="failed", error=job.error)
+            _post_callback(job, status=status, result=result, error=error)
         except Exception as exc:  # noqa: BLE001 - 回调失败不影响任务状态机
-            logger.warning("终局失败回调投递异常 job_id=%s: %s", job_id, exc)
+            logger.warning("%s 回调投递异常 job_id=%s: %s", status, job_id, exc)
 
     def shutdown(self, timeout: float = 10.0) -> None:
-        """置停并 join worker(排空在途)。挂起的重试 Timer 取消并把对应任务标终态。"""
+        """置停并 join worker(排空在途)。挂起的重试 Timer 取消并把对应任务标终态。
+
+        排空窗口(P2-6):server 停机传 `OPS_MAX_RUN_SECONDS+10`(与 redis worker 一致),
+        默认 10s 仅供测试/嵌入场景 —— 在途诊断可长至 max_run,10s join 会截断它。
+        """
         self._stop.set()
         with self._lock:
             pending = dict(self._timers)
             self._timers.clear()
         for timer in pending:
             timer.cancel()  # 取消还没触发的重试,避免 daemon Timer 静默丢单
+        newly_failed: list[str] = []
         if pending:
             with self._lock:
                 for job_id in pending.values():
-                    self._mark_failed_locked(job_id, "shutdown_retry_cancelled")
+                    if self._mark_failed_locked(job_id, "shutdown_retry_cancelled"):
+                        newly_failed.append(job_id)
+        for job_id in newly_failed:
+            # P2-6:取消的重试是终局失败,发 failed 回调(best-effort;停机窗内网络 IO
+            # 有 10s 超时上限,失败只 warn,不阻塞退出)
+            self._notify_failed(job_id)
         for t in self._threads:
             t.join(timeout=timeout)

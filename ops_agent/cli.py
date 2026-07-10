@@ -230,6 +230,7 @@ def _redis_queue_or_exit():
         queue_key=s.ops_queue_key,
         dlq_key=s.ops_dlq_key,
         max_retries=s.ops_max_retries,
+        audit_log=s.ops_approval_log,  # P2-8:CLI 回灌死信也写审计链
     )
 
 
