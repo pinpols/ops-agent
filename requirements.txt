@@ -2,7 +2,7 @@
 # 版本可能落后 —— 权威锁定文件是 requirements.lock(uv pip compile 生成,含 hash,CI 用)。
 # 开发/测试请用 `pip install -e ".[dev]"`;升级依赖时两个文件都要同步。
 annotated-types==0.7.0
-anthropic==0.39.0
+anthropic==0.116.0
 certifi==2024.12.14
 charset-normalizer==3.4.1
 click==8.1.7
