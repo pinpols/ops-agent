@@ -355,6 +355,53 @@ class MarkRunningTerminalGuardTest(unittest.TestCase):
         self.assertEqual(rq.get(job.id).result, {"ok": True})  # 结果没被覆写
 
 
+class SucceededCallbackOrderingTest(unittest.TestCase):
+    """P1-3:succeeded 回调必须在 complete 确认"本方是第一个终态写入者"之后才投递;
+    complete 被终态守卫拒绝(如 reaper 已判 FAILED)时,绝不能给下游发 succeeded。"""
+
+    def test_complete_returns_true_only_on_first_terminal_write(self):
+        rq = _rq()
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        self.assertTrue(rq.complete(job.id, {"ok": True}))
+        self.assertFalse(rq.complete(job.id, {"ok": 2}))  # 已终态 → 拒绝
+
+    def test_complete_returns_false_when_already_failed(self):
+        rq = _rq(max_retries=0)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        rq.fail_or_retry(job.id, "reaper 判死")  # 另一方先写了 FAILED
+        self.assertFalse(rq.complete(job.id, {"ok": True}))
+        self.assertEqual(rq.get(job.id).status, FAILED)  # 不覆写
+
+    def test_succeeded_callback_after_complete_wins(self):
+        rq = _rq()
+        job = rq.submit("q")
+        with patch("ops_agent.callback._post_callback") as cb:
+            self.assertEqual(process_once(rq, lambda j: {"echo": j.question}, timeout=1), "succeeded")
+        succeeded = [c for c in cb.call_args_list if c.kwargs.get("status") == "succeeded"]
+        self.assertEqual(len(succeeded), 1)
+        self.assertEqual(succeeded[0].args[0].id, job.id)
+
+    def test_no_succeeded_callback_when_complete_rejected(self):
+        # handler 跑完前任务已被另一方判 FAILED(reaper 抢走后终局)→ 不发 succeeded
+        rq = _rq(max_retries=0)
+        job = rq.submit("q")
+
+        def handler(j):
+            # 模拟 handler 长跑期间另一方(reaper/另一 worker)把任务判成 FAILED
+            rq.fail_or_retry(j.id, "stale_running_timeout")
+            return {"ok": True}
+
+        with patch("ops_agent.callback._post_callback") as cb:
+            process_once(rq, handler, timeout=1)
+        succeeded = [c for c in cb.call_args_list if c.kwargs.get("status") == "succeeded"]
+        self.assertEqual(succeeded, [])  # 乱序终态信号被堵住
+        self.assertEqual(rq.get(job.id).status, FAILED)
+
+
 class ReaperHeartbeatRaceTest(unittest.TestCase):
     """P0-1:心跳模型 —— 忙 worker(心跳持续续、但不 consume)不得被判死;
     reaper 判死后回收前须二次确认心跳仍 stale,drain 中途心跳复活要立刻停手。"""

@@ -71,6 +71,28 @@ class JobQueueTest(unittest.TestCase):
         self.assertEqual(len(failed), 1)  # 共 2 次尝试,只在终局回调 1 次
         self.assertEqual(calls[0][0].attempts, 2)
 
+    def test_success_posts_succeeded_callback_after_terminal_write(self):
+        # P1-3:succeeded 回调由队列层在状态写成 SUCCEEDED 之后投递(与 redis 后端一致),
+        # 不再由 handler 提前发出。
+        calls = []
+        with patch(
+            "ops_agent.callback._post_callback",
+            side_effect=lambda job, **kw: calls.append((job, kw)),
+        ):
+            jq = JobQueue(lambda job: {"ok": True}, workers=1)
+            try:
+                job = jq.submit("x")
+                done = _wait(jq, job.id)
+                self.assertEqual(done.status, SUCCEEDED)
+                deadline = time.time() + 2
+                while time.time() < deadline and not calls:
+                    time.sleep(0.01)
+            finally:
+                jq.shutdown()
+        succeeded = [kw for _job, kw in calls if kw.get("status") == "succeeded"]
+        self.assertEqual(len(succeeded), 1)
+        self.assertEqual(succeeded[0]["result"], {"ok": True})
+
     def test_non_retryable_exception_fails_without_retries(self):
         # P2-4:BudgetExceeded 等确定性失败不重试,attempts 停在 1
         from ops_agent.budget import BudgetExceeded

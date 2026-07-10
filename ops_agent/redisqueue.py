@@ -285,11 +285,14 @@ class RedisQueue:
                 except WatchError:
                     continue
 
-    def complete(self, job_id: str, result: dict) -> None:
+    def complete(self, job_id: str, result: dict) -> bool:
         """标记成功。**原子 + 终态守卫**:WATCH 状态 → 仅当未终态/未丢失才写。
 
         避免迟到的 complete 覆写一个已被(重复投递的)另一 worker 写成 FAILED 的 job,
         也避免在 hash 已 TTL 过期后用 hset 重建一个无 question/无 TTL 的僵尸。
+
+        返回是否**真正写入了 SUCCEEDED**(P1-3):调用方据此决定要不要投递 succeeded
+        回调 —— 被守卫拒绝时本方不是第一个终态写入者,发 succeeded 会给下游乱序终态。
         """
         key = self._job_key(job_id)
         with self._r.pipeline() as pipe:
@@ -300,7 +303,7 @@ class RedisQueue:
                     if status is None or status in (SUCCEEDED, FAILED):
                         pipe.unwatch()
                         self.discard(job_id)  # 在途登记别悬空
-                        return  # 哈希已丢失 / 已终态 → 不覆写、不复活
+                        return False  # 哈希已丢失 / 已终态 → 不覆写、不复活
                     pipe.multi()
                     pipe.hset(
                         key,
@@ -313,6 +316,7 @@ class RedisQueue:
                     continue
         METRICS.inc("jobs_succeeded_total")
         self.update_queue_metrics()
+        return True
 
     def fail_or_retry(self, job_id: str, error: str, *, retryable: bool = True) -> str:
         """失败处理:未超上限 → 重入队('retried');超限或不可重试 → DLQ('dead');哈希丢失 → 'lost'。

@@ -53,7 +53,11 @@ def process_once(rq: WorkerQueue, handler: Any, timeout: int = 1) -> str | None:
     try:
         logger.info("处理 job_id=%s trace_id=%s", job_id, job.trace_id)
         result = handler(job)
-        rq.complete(job_id, result)
+        if not rq.complete(job_id, result):
+            # 任务已被另一方(reaper/重复副本)写成终态 → 本方结果作废,不发 succeeded(P1-3)
+            logger.warning("job %s trace_id=%s 完成时已被判终态,结果丢弃", job_id, job.trace_id)
+            return "superseded"
+        _notify_succeeded(job, result)
         return "succeeded"
     except Exception as exc:  # noqa: BLE001 - worker 边界:失败转重试/DLQ,不崩线程
         # P2-4:确定性失败(预算耗尽/max_steps 绕圈)重试注定同样结局,直接判 dead 进 DLQ
@@ -71,6 +75,16 @@ def process_once(rq: WorkerQueue, handler: Any, timeout: int = 1) -> str | None:
     finally:
         METRICS.observe("job_duration_seconds", time.monotonic() - started, backend="redis")
         METRICS.add("workers_busy", -1, backend="redis")
+
+
+def _notify_succeeded(job: Any, result: dict) -> None:
+    """succeeded 回调(P1-3,best-effort):只在 complete 确认本方是第一个终态写入者后投递。"""
+    try:
+        from ops_agent.callback import _post_callback
+
+        _post_callback(job, status="succeeded", result=result)
+    except Exception as exc:  # noqa: BLE001 - 回调失败不影响队列状态机
+        logger.warning("succeeded 回调投递异常 job_id=%s: %s", job.id, exc)
 
 
 def _touch_heartbeat(path: Path | None) -> None:

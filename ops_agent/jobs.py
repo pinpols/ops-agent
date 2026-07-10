@@ -13,7 +13,6 @@ from typing import Any
 
 from ops_agent.audit import audit_actor
 from ops_agent.budget import BudgetExceeded
-from ops_agent.callback import _post_callback
 from ops_agent.metrics import METRICS
 from ops_agent.prompts import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
 
@@ -117,8 +116,9 @@ def diagnosis_job_handler(job: Any) -> dict[str, Any]:
     # 失败回调不在这里投递(P2-3):每次重试 attempt 都会发 failed、之后又可能发 succeeded,
     # 下游收到乱序终态信号。failed 只在**终局**(重试耗尽/不可重试判 dead)由队列层投递,
     # payload 带最终 attempts;下游"等不到失败通知"的诉求由终局回调满足。
+    # succeeded 回调也不在这里投递(P1-3):必须等队列层 complete 确认"本方是第一个
+    # 终态写入者"之后才发 —— 若任务已被 reaper 判 FAILED,handler 跑完仍发 succeeded
+    # 会给下游乱序终态。回调由 worker_main(redis)/ JobQueue(memory)在终态写入后统一投递。
     with audit_actor(getattr(job, "actor", None)):
         diagnosis = run_agent(q, approver=_deny_all_approver, trace_id=job.trace_id)[0]
-    result = {"trace_id": job.trace_id, "diagnosis": diagnosis.model_dump(mode="json")}
-    _post_callback(job, status="succeeded", result=result)
-    return result
+    return {"trace_id": job.trace_id, "diagnosis": diagnosis.model_dump(mode="json")}

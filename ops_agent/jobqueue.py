@@ -220,11 +220,16 @@ class JobQueue:
                 started = time.monotonic()
                 try:
                     result = self._handler(job)
+                    completed = False
                     with self._lock:
                         if job_id in self._jobs:
                             self._jobs[job_id].result = result
                             self._jobs[job_id].status = SUCCEEDED
+                            completed = True
                     METRICS.inc("jobs_succeeded_total")
+                    if completed:
+                        # P1-3:succeeded 回调在终态写入后由队列层投递(与 redis 后端一致)
+                        self._notify(job_id, status="succeeded", result=result)
                 except Exception as exc:  # noqa: BLE001 - worker 边界:任务失败不拖垮 worker
                     logger.exception("诊断任务失败 job_id=%s trace_id=%s", job_id, job.trace_id)
                     retry_delay: float | None = None
@@ -261,12 +266,21 @@ class JobQueue:
         job = self.get(job_id)
         if job is None:
             return
+        self._notify(job_id, status="failed", error=job.error)
+
+    def _notify(
+        self, job_id: str, *, status: str, result: dict | None = None, error: str | None = None
+    ) -> None:
+        """终态回调统一投递口(best-effort,锁外调用,回调失败不影响任务状态机)。"""
+        job = self.get(job_id)
+        if job is None:
+            return
         try:
             from ops_agent.callback import _post_callback
 
-            _post_callback(job, status="failed", error=job.error)
+            _post_callback(job, status=status, result=result, error=error)
         except Exception as exc:  # noqa: BLE001 - 回调失败不影响任务状态机
-            logger.warning("终局失败回调投递异常 job_id=%s: %s", job_id, exc)
+            logger.warning("%s 回调投递异常 job_id=%s: %s", status, job_id, exc)
 
     def shutdown(self, timeout: float = 10.0) -> None:
         """置停并 join worker(排空在途)。挂起的重试 Timer 取消并把对应任务标终态。"""
