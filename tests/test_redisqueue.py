@@ -647,6 +647,82 @@ class NonRetryableWorkerTest(unittest.TestCase):
         self.assertEqual(rq.dlq_size(), 0)
 
 
+class QueueAuditTrailTest(unittest.TestCase):
+    """P2-8:dlq_requeue 与 reaper 回灌/判死写入 audit hash chain(本地链,无网络依赖)。"""
+
+    def _rq_with_audit(self, tmp, **kw):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        return client, RedisQueue(
+            client, worker_id="w2", audit_log=Path(tmp) / "approvals.jsonl", **kw
+        )
+
+    def _records(self, tmp):
+        import json
+
+        path = Path(tmp) / "approvals.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(x) for x in path.read_text().splitlines()]
+
+    def test_dlq_requeue_writes_queue_requeue_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client, rq = self._rq_with_audit(tmp, max_retries=0)
+            job = rq.submit("q")
+            rq.consume(timeout=1)
+            rq.fail_or_retry(job.id, "boom")  # 直接进 DLQ
+            self.assertTrue(rq.dlq_requeue(job.id))
+            records = [r for r in self._records(tmp) if r.get("type") == "queue"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["event"], "QUEUE_REQUEUE")
+        self.assertEqual(records[0]["job_id"], job.id)
+        self.assertEqual(records[0]["outcome"], "requeued")
+        self.assertIn("hash", records[0])  # 走同一条 hash chain
+
+    def test_reaper_writes_queue_reap_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client, rq = self._rq_with_audit(tmp, max_retries=2)
+            w1 = RedisQueue(client, worker_id="w1", max_retries=2)
+            job = w1.submit("q")
+            w1.consume(timeout=1)
+            w1.mark_running(job.id)
+            client.zadd("ops:queue:workers", {"w1": time.time() - 3600})
+            stats = rq.reap(now=time.time())
+            self.assertEqual(stats["requeued"], 1)
+            records = [r for r in self._records(tmp) if r.get("type") == "queue"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["event"], "QUEUE_REAP")
+        self.assertEqual(records[0]["job_id"], job.id)
+        self.assertEqual(records[0]["outcome"], "retried")
+        self.assertIn("worker_crashed:w1", records[0]["detail"])
+
+    def test_audit_failure_does_not_break_queue_ops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client, rq = self._rq_with_audit(tmp, max_retries=0)
+            rq._audit_log = Path("/proc/definitely/not/writable/a.jsonl")
+            job = rq.submit("q")
+            rq.consume(timeout=1)
+            rq.fail_or_retry(job.id, "boom")
+            self.assertTrue(rq.dlq_requeue(job.id))  # 审计失败不影响队列状态机
+
+    def test_from_settings_wires_audit_log(self):
+        import os
+        from unittest.mock import patch as _patch
+
+        from ops_agent.config import Settings
+
+        env = {
+            "OPS_QUEUE_BACKEND": "redis",
+            "OPS_REDIS_URL": "redis://localhost:6/0",
+            "OPS_APPROVAL_LOG": "/tmp/x/approvals.jsonl",
+        }
+        with (
+            _patch.dict(os.environ, env, clear=True),
+            _patch("redis.from_url", return_value=fakeredis.FakeRedis(decode_responses=True)),
+        ):
+            rq = RedisQueue.from_settings(Settings.from_env())
+        self.assertTrue(str(rq._audit_log).endswith("/tmp/x/approvals.jsonl"))  # macOS /private 前缀
+
+
 class ConcurrentReapGuardTest(unittest.TestCase):
     """P2-5①:两个 reaper 同窗回收同一 stale RUNNING job → fail_or_retry 双执行、
     attempts 双增。守卫:带 expected_running_since 的调用仅当仍 RUNNING 且

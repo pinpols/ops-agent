@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Any
 from redis.exceptions import WatchError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ops_agent.config import Settings
 
 from ops_agent.jobqueue import FAILED, QUEUED, RUNNING, SUCCEEDED, DiagnosisJob
@@ -65,6 +67,7 @@ class RedisQueue:
         worker_id: str | None = None,
         worker_dead_after_seconds: float = 60.0,
         stale_running_seconds: float = 240.0,
+        audit_log: "Path | None" = None,
     ) -> None:
         self._r = client
         self._queue_key = queue_key
@@ -83,6 +86,8 @@ class RedisQueue:
         self._workers_key = f"{queue_key}:workers"
         self._worker_dead_after_seconds = max(1.0, worker_dead_after_seconds)
         self._stale_running_seconds = max(1.0, stale_running_seconds)
+        # P2-8:队列运维动作(DLQ 回灌/reaper 回收)审计链;未配则不留痕(测试/嵌入场景)
+        self._audit_log = audit_log
 
     @classmethod
     def from_url(cls, url: str, **kwargs: Any) -> "RedisQueue":
@@ -108,6 +113,7 @@ class RedisQueue:
             queue_depth_alert_threshold=settings.ops_queue_depth_alert_threshold,
             worker_dead_after_seconds=settings.ops_worker_dead_after_seconds,
             stale_running_seconds=settings.ops_stale_running_seconds,
+            audit_log=settings.ops_approval_log,
         )
 
     # ── 序列化 ────────────────────────────────────────────────
@@ -523,6 +529,9 @@ class RedisQueue:
             # hash 在上面 _load 与 fail_or_retry 之间蒸发(P1-4③):jobs_lost_total 已由
             # fail_or_retry 计数,这里补 stats,否则 reaper 日志/汇总漏报丢单
             stats["lost"] += 1
+        if outcome != "skipped":
+            # P2-8:reaper 改变任务命运(回灌/判死/丢失)要留审计痕;skipped=没动它,不记
+            self._audit_queue_event("QUEUE_REAP", job_id, outcome, detail=error)
 
     def retry_size(self) -> int:
         return int(self._r.zcard(self._retry_key))
@@ -571,7 +580,23 @@ class RedisQueue:
                 except WatchError:
                     continue
         self.update_queue_metrics()
+        self._audit_queue_event("QUEUE_REQUEUE", job_id, "requeued")  # P2-8:DLQ 回灌留痕
         return True
+
+    def _audit_queue_event(
+        self, event: str, job_id: str, outcome: str, detail: str | None = None
+    ) -> None:
+        """队列运维动作写审计 hash chain(P2-8,best-effort:审计失败不影响队列状态机)。"""
+        if self._audit_log is None:
+            return
+        try:
+            from ops_agent.audit import append_queue_record
+
+            append_queue_record(
+                self._audit_log, event=event, job_id=job_id, outcome=outcome, detail=detail
+            )
+        except Exception as exc:  # noqa: BLE001 - 审计尽力而为,不阻断回收/回灌
+            logger.warning("队列审计写入失败 event=%s job_id=%s: %s", event, job_id, exc)
 
     def close(self) -> None:
         import contextlib

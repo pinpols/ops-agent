@@ -171,6 +171,31 @@ def append_approval_record(
     )
 
 
+def append_queue_record(
+    path: Path,
+    *,
+    event: str,
+    job_id: str,
+    outcome: str,
+    detail: str | None = None,
+    actor: str | None = None,
+) -> None:
+    """队列运维动作留痕(P2-8):DLQ 回灌(QUEUE_REQUEUE)与 reaper 判死回收(QUEUE_REAP)
+    改变任务命运却曾不入审计 —— 与审批/执行记录同一条本地 hash chain,无网络依赖。"""
+    _write_record(
+        path,
+        {
+            "type": "queue",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "actor": _normalize_actor(actor) if actor else _audit_actor(),
+            "event": event,
+            "job_id": job_id,
+            "outcome": outcome,
+            "detail": detail,
+        },
+    )
+
+
 def append_execution_record(
     path: Path,
     *,
