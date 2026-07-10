@@ -206,21 +206,30 @@ class MemoryDeadPathCallbackTest(unittest.TestCase):
 
     def test_retry_queue_full_posts_failed_callback(self):
         calls = []
+        gate = threading.Event()
+
+        def slow(job):
+            gate.wait(5)
+            return {}
+
         with patch(
             "ops_agent.callback._post_callback",
             side_effect=lambda job, **kw: calls.append((job, kw)),
         ):
-            jq = JobQueue(lambda job: {}, workers=1, max_queue=1)
+            # workers=1 被 gate 占住 → 队列(max=1)被 b 填满,确定性触发 queue.Full
+            jq = JobQueue(slow, workers=1, max_queue=1)
             try:
-                job = jq.submit("x")
-                _wait(jq, job.id)
-                jq.get(job.id).status = QUEUED  # 摆回非终态,模拟重试中
-                # 手工造"重试入队时队列已满":塞满队列后触发 _requeue
-                jq._q.put_nowait("occupier")
-                jq._requeue(job.id)
+                a = jq.submit("a")
+                deadline = time.time() + 3
+                while time.time() < deadline and jq.get(a.id).status != "running":
+                    time.sleep(0.01)
+                b = jq.submit("b")  # 占满队列
+                self.assertEqual(jq.qsize(), 1)
+                jq._requeue(b.id)  # 重试入队 → 队列已满 → 终局 FAILED + 回调
             finally:
-                jq._q.get_nowait()
+                gate.set()
                 jq.shutdown()
+        self.assertEqual(jq.get(b.id).error, "retry_queue_full")
         failed = [kw for _job, kw in calls if kw.get("status") == "failed"]
         self.assertEqual(len(failed), 1)
         self.assertIn("retry_queue_full", failed[0].get("error") or "")

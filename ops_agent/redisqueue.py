@@ -526,9 +526,7 @@ class RedisQueue:
             METRICS.inc("jobs_lost_total")
             stats["lost"] += 1
             return
-        outcome = self.fail_or_retry(
-            job_id, error, expected_running_since=expected_running_since
-        )
+        outcome = self.fail_or_retry(job_id, error, expected_running_since=expected_running_since)
         if outcome == "retried":
             stats["requeued"] += 1
         elif outcome == "dead":

@@ -138,9 +138,7 @@ class Settings:
             )
         model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
         max_run_seconds = float(os.environ.get("OPS_MAX_RUN_SECONDS", "120"))
-        llm_timeout_seconds = float(
-            os.environ.get("OPS_LLM_TIMEOUT_SECONDS", str(max_run_seconds))
-        )
+        llm_timeout_seconds = float(os.environ.get("OPS_LLM_TIMEOUT_SECONDS", str(max_run_seconds)))
         # P0-1②:dead_after 默认派生 —— 必须覆盖"handler 忙跑 max_run + LLM 超时"的合法最坏
         # 窗口(+60s 余量),否则忙 worker 被对面 reaper 判死、在途任务被抢走造成双执行。
         worker_dead_after_seconds = float(

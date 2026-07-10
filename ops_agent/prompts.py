@@ -4,10 +4,10 @@
 trace 与 bundle 会记录当时的 (model, PROMPT_VERSION),回归对比时能定位"是哪版 prompt 导致分数变化"。
 """
 
+import re
+
 # 改 _AGENT_SYSTEM 文案 → 必须同步 bump 这里。CI eval 用它标注基线。
 PROMPT_VERSION = "1.4.0"  # 1.4.0: 加 Flink 写工具(cancel/savepoint,危险/需审批,默认 dry-run)
-
-import re
 
 # 工具返回内容回喂 LLM 时的不可信数据围栏标记。系统 prompt 明确:围栏内一律是数据、非指令。
 UNTRUSTED_OPEN = "<<<UNTRUSTED_TOOL_OUTPUT"
@@ -34,6 +34,7 @@ _CLOSE_MARKER_RE = _marker_regex(UNTRUSTED_CLOSE)
 def contains_fence_marker(text: str) -> bool:
     """文本里是否出现围栏开/闭标记(含大小写/零宽插入/全角尖括号变体)。输入侧校验用。"""
     return bool(_OPEN_MARKER_RE.search(text) or _CLOSE_MARKER_RE.search(text))
+
 
 AGENT_SYSTEM = (
     "你是资深 SRE。工具:list_services(列服务)、tail_recent_errors(扫近期异常)、"

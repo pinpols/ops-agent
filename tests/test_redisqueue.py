@@ -380,7 +380,8 @@ class SucceededCallbackOrderingTest(unittest.TestCase):
         rq = _rq()
         job = rq.submit("q")
         with patch("ops_agent.callback._post_callback") as cb:
-            self.assertEqual(process_once(rq, lambda j: {"echo": j.question}, timeout=1), "succeeded")
+            outcome = process_once(rq, lambda j: {"echo": j.question}, timeout=1)
+        self.assertEqual(outcome, "succeeded")
         succeeded = [c for c in cb.call_args_list if c.kwargs.get("status") == "succeeded"]
         self.assertEqual(len(succeeded), 1)
         self.assertEqual(succeeded[0].args[0].id, job.id)
@@ -468,9 +469,7 @@ class WorkerHeartbeatThreadTest(unittest.TestCase):
     def test_heartbeat_loop_renews_periodically_until_stop(self):
         rq = MagicMock()
         stop = threading.Event()
-        t = threading.Thread(
-            target=worker_main._heartbeat_loop, args=(rq, stop, 0.01), daemon=True
-        )
+        t = threading.Thread(target=worker_main._heartbeat_loop, args=(rq, stop, 0.01), daemon=True)
         t.start()
         deadline = time.time() + 2
         while time.time() < deadline and rq.heartbeat.call_count < 3:
@@ -483,9 +482,7 @@ class WorkerHeartbeatThreadTest(unittest.TestCase):
         rq = MagicMock()
         rq.heartbeat.side_effect = ConnectionError("redis down")
         stop = threading.Event()
-        t = threading.Thread(
-            target=worker_main._heartbeat_loop, args=(rq, stop, 0.01), daemon=True
-        )
+        t = threading.Thread(target=worker_main._heartbeat_loop, args=(rq, stop, 0.01), daemon=True)
         t.start()
         deadline = time.time() + 2
         while time.time() < deadline and rq.heartbeat.call_count < 2:
@@ -762,7 +759,8 @@ class QueueAuditTrailTest(unittest.TestCase):
             _patch("redis.from_url", return_value=fakeredis.FakeRedis(decode_responses=True)),
         ):
             rq = RedisQueue.from_settings(Settings.from_env())
-        self.assertTrue(str(rq._audit_log).endswith("/tmp/x/approvals.jsonl"))  # macOS /private 前缀
+        # macOS 下 /tmp 解析为 /private/tmp,故用后缀断言
+        self.assertTrue(str(rq._audit_log).endswith("/tmp/x/approvals.jsonl"))
 
 
 class ConcurrentReapGuardTest(unittest.TestCase):
