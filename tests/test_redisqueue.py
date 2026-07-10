@@ -647,6 +647,55 @@ class NonRetryableWorkerTest(unittest.TestCase):
         self.assertEqual(rq.dlq_size(), 0)
 
 
+class ConcurrentReapGuardTest(unittest.TestCase):
+    """P2-5①:两个 reaper 同窗回收同一 stale RUNNING job → fail_or_retry 双执行、
+    attempts 双增。守卫:带 expected_running_since 的调用仅当仍 RUNNING 且
+    running_since 未变才执行。"""
+
+    def _stale_running_job(self, client):
+        rq = RedisQueue(client, worker_id="w1", max_retries=5, stale_running_seconds=10)
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        client.hset(rq._job_key(job.id), "running_since", str(time.time() - 3600))
+        return rq, job
+
+    def test_fail_or_retry_skips_when_running_since_changed(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq, job = self._stale_running_job(client)
+        observed = client.hget(rq._job_key(job.id), "running_since")
+        # 第一个 reaper 先回收成功(同一观测值)
+        self.assertEqual(
+            rq.fail_or_retry(job.id, "stale", expected_running_since=observed), "retried"
+        )
+        self.assertEqual(rq.get(job.id).attempts, 1)
+        # 第二个 reaper 拿着同一份旧观测值迟到 → 必须跳过,attempts 不双增
+        rq2 = RedisQueue(client, worker_id="w2", max_retries=5, stale_running_seconds=10)
+        self.assertEqual(
+            rq2.fail_or_retry(job.id, "stale", expected_running_since=observed), "skipped"
+        )
+        self.assertEqual(rq2.get(job.id).attempts, 1)
+        self.assertEqual(rq2.retry_size() + rq2.qsize(), 1)  # 没被双份入队
+
+    def test_fail_or_retry_skips_when_job_remarked_running_by_new_worker(self):
+        # 回收间隙任务已被新 worker 领走重跑(running_since 变新)→ 旧观测值失效,跳过
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq, job = self._stale_running_job(client)
+        observed = client.hget(rq._job_key(job.id), "running_since")
+        rq.mark_running(job.id)  # 新一轮执行:running_since 刷新
+        self.assertEqual(
+            rq.fail_or_retry(job.id, "stale", expected_running_since=observed), "skipped"
+        )
+        self.assertEqual(rq.get(job.id).status, RUNNING)  # 在跑的不被打断
+
+    def test_reap_stale_running_still_works_end_to_end(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq, job = self._stale_running_job(client)
+        stats = rq.reap(now=time.time())
+        self.assertEqual(stats["requeued"], 1)
+        self.assertEqual(rq.get(job.id).status, QUEUED)
+
+
 class MetricsFlushTest(unittest.TestCase):
     """P1-4①:complete/finally/reaper 里更新的指标发生在 run_agent 内部 flush 之后 ——
     消费循环与 reaper 每轮结束必须 flush textfile,空闲 worker 也要周期 flush。"""

@@ -139,5 +139,26 @@ class WorkerDeadAfterDerivationTest(unittest.TestCase):
         self.assertFalse(any("OPS_WORKER_DEAD_AFTER_SECONDS" in r.getMessage() for r in records))
 
 
+class StaleRunningDerivationTest(unittest.TestCase):
+    """P2-5②:stale_running 默认 2×max_run 可能小于合法最坏(max_run+llm_timeout+工具),
+    默认派生改 max_run + llm_timeout + 120。"""
+
+    def test_stale_running_default_derives_from_run_and_llm_budget(self):
+        with patch.dict(
+            os.environ,
+            {"OPS_MAX_RUN_SECONDS": "120", "OPS_LLM_TIMEOUT_SECONDS": "300"},
+            clear=True,
+        ):
+            self.assertEqual(Settings.from_env().ops_stale_running_seconds, 120 + 300 + 120)
+
+    def test_stale_running_explicit_env_wins(self):
+        with patch.dict(
+            os.environ,
+            {"OPS_MAX_RUN_SECONDS": "120", "OPS_STALE_RUNNING_SECONDS": "999"},
+            clear=True,
+        ):
+            self.assertEqual(Settings.from_env().ops_stale_running_seconds, 999)
+
+
 if __name__ == "__main__":
     unittest.main()

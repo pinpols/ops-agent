@@ -108,7 +108,7 @@ class Settings:
     ops_sync_max_concurrent: int = 4
     # 崩溃回收(reaper,P1-1):Redis 心跳超时判 worker 死 / RUNNING 卡死阈值 / reaper 周期。
     ops_worker_dead_after_seconds: float = 300.0  # from_env 派生 max_run+llm_timeout+60
-    ops_stale_running_seconds: float = 240.0  # 未显式配置时 from_env 派生为 2×max_run_seconds
+    ops_stale_running_seconds: float = 360.0  # from_env 派生 max_run+llm_timeout+120
     ops_reaper_interval_seconds: float = 30.0
 
     @property
@@ -237,9 +237,13 @@ class Settings:
             ops_llm_timeout_seconds=llm_timeout_seconds,
             ops_sync_max_concurrent=int(os.environ.get("OPS_SYNC_MAX_CONCURRENT", "4")),
             ops_worker_dead_after_seconds=worker_dead_after_seconds,
-            # RUNNING 卡死阈值:默认 2× 单次 run 预算(留足重试/收尾余量),可显式覆盖
+            # RUNNING 卡死阈值(P2-5②):旧默认 2×max_run 可能小于合法最坏
+            # (run 预算 + LLM 单次超时 + 工具收尾);默认派生 max_run+llm_timeout+120,可显式覆盖
             ops_stale_running_seconds=float(
-                os.environ.get("OPS_STALE_RUNNING_SECONDS", str(max_run_seconds * 2))
+                os.environ.get(
+                    "OPS_STALE_RUNNING_SECONDS",
+                    str(max_run_seconds + llm_timeout_seconds + 120),
+                )
             ),
             ops_reaper_interval_seconds=float(os.environ.get("OPS_REAPER_INTERVAL_SECONDS", "30")),
         )

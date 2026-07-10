@@ -318,8 +318,20 @@ class RedisQueue:
         self.update_queue_metrics()
         return True
 
-    def fail_or_retry(self, job_id: str, error: str, *, retryable: bool = True) -> str:
+    def fail_or_retry(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        retryable: bool = True,
+        expected_running_since: str | None = None,
+    ) -> str:
         """失败处理:未超上限 → 重入队('retried');超限或不可重试 → DLQ('dead');哈希丢失 → 'lost'。
+
+        **并发回收守卫**(P2-5①):传 `expected_running_since`(reaper 观测到的值)时,
+        仅当任务仍 RUNNING 且 running_since 未变才执行,否则返回 'skipped' ——
+        两个 reaper 同窗回收同一 stale job 时只有一个生效,attempts 不双增、不双入队;
+        任务已被新 worker 领走重跑(running_since 刷新)时也不误伤。
 
         **原子 + 终态/存在守卫**(WATCH/MULTI):
         - 旧实现 `hincrby` 在 hash 已 TTL 过期时会**重建一个无 TTL、丢了 question 的僵尸 job**
@@ -345,6 +357,11 @@ class RedisQueue:
                         pipe.unwatch()
                         self.discard(job_id)
                         return "dead" if status == FAILED else "succeeded"  # 已终态,不重处理
+                    if expected_running_since is not None:
+                        current = pipe.hget(key, "running_since")
+                        if status != RUNNING or current != expected_running_since:
+                            pipe.unwatch()
+                            return "skipped"  # 已被别的 reaper 回收 / 已被新 worker 领走
                     attempts = int(pipe.hget(key, "attempts") or 0) + 1
                     if retryable and attempts <= self._max_retries:
                         retry_after = time.time() + self._retry_delay(attempts)
@@ -470,7 +487,10 @@ class RedisQueue:
             if worker:
                 self._r.lrem(self._processing_prefix + worker, 1, job_id)
             logger.warning("reaper 回收 RUNNING 卡死任务 job_id=%s worker=%s", job_id, worker)
-            self._reap_one(job_id, stats, error="stale_running_timeout")
+            # P2-5①:带上观测到的 running_since —— 并发 reaper 只有一个能真正回收
+            self._reap_one(
+                job_id, stats, error="stale_running_timeout", expected_running_since=running_since
+            )
         if any(stats.values()):
             METRICS.inc("jobs_reaped_total", sum(stats.values()))
             self.update_queue_metrics()
@@ -480,12 +500,21 @@ class RedisQueue:
         score = self._r.zscore(self._workers_key, wid)
         return score is not None and now - float(score) < self._worker_dead_after_seconds
 
-    def _reap_one(self, job_id: str, stats: dict[str, int], *, error: str) -> None:
+    def _reap_one(
+        self,
+        job_id: str,
+        stats: dict[str, int],
+        *,
+        error: str,
+        expected_running_since: str | None = None,
+    ) -> None:
         if self._load(job_id) is None:
             METRICS.inc("jobs_lost_total")
             stats["lost"] += 1
             return
-        outcome = self.fail_or_retry(job_id, error)
+        outcome = self.fail_or_retry(
+            job_id, error, expected_running_since=expected_running_since
+        )
         if outcome == "retried":
             stats["requeued"] += 1
         elif outcome == "dead":
