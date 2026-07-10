@@ -28,8 +28,6 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from redis.exceptions import WatchError
-
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -177,6 +175,8 @@ class RedisQueue:
         )
         job_key = self._job_key(job.id)
         mapping = self._mapping(job)
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -258,6 +258,8 @@ class RedisQueue:
         这里遇终态即清 processing 登记并返回 False(调用方跳过执行)。
         """
         key = self._job_key(job_id)
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -301,6 +303,8 @@ class RedisQueue:
         回调 —— 被守卫拒绝时本方不是第一个终态写入者,发 succeeded 会给下游乱序终态。
         """
         key = self._job_key(job_id)
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -349,6 +353,8 @@ class RedisQueue:
         不浪费重试预算重复烧钱。终局失败(dead)才投递 failed 回调(P2-3)。
         """
         key = self._job_key(job_id)
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -429,6 +435,8 @@ class RedisQueue:
         并发 worker 同扫时 WATCH 冲突方重试,不会双份入队。
         """
         now = time.time() if now is None else now
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -555,6 +563,8 @@ class RedisQueue:
         """
         job_key = self._job_key(job_id)
         reset = {"status": QUEUED, "attempts": "0", "error": ""}
+        from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
+
         with self._r.pipeline() as pipe:
             while True:
                 try:
@@ -601,5 +611,7 @@ class RedisQueue:
     def close(self) -> None:
         import contextlib
 
+        with contextlib.suppress(Exception):  # P3:优雅退出摘除自己的心跳,别让 reaper
+            self._r.zrem(self._workers_key, self._worker_id)  # 在 dead_after 窗口内误当活 worker
         with contextlib.suppress(Exception):  # 关闭尽力而为
             self._r.close()

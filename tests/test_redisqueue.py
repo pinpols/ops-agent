@@ -647,6 +647,48 @@ class NonRetryableWorkerTest(unittest.TestCase):
         self.assertEqual(rq.dlq_size(), 0)
 
 
+class OptionalRedisDependencyTest(unittest.TestCase):
+    """P3:模块 docstring 承诺 redis 是可选依赖、仅延迟 import —— 顶层 WatchError import
+    会让未装 redis 的 memory 后端环境 import 本模块即炸。"""
+
+    def test_module_import_does_not_require_redis(self):
+        import importlib
+        import sys
+
+        saved = {
+            name: sys.modules.pop(name)
+            for name in list(sys.modules)
+            if name == "redis" or name.startswith("redis.")
+        }
+        # sys.modules 里塞 None → import 该名字立刻 ImportError(标准阻断手法)
+        sys.modules["redis"] = None  # type: ignore[assignment]
+        sys.modules["redis.exceptions"] = None  # type: ignore[assignment]
+        try:
+            import ops_agent.redisqueue as rq_mod
+
+            importlib.reload(rq_mod)  # redis 不可用时模块本身仍可 import
+        finally:
+            for name in ("redis", "redis.exceptions"):
+                sys.modules.pop(name, None)
+            sys.modules.update(saved)
+            import ops_agent.redisqueue as rq_mod
+
+            importlib.reload(rq_mod)  # 恢复真实模块状态,别污染后续测试
+
+
+class CloseCleanupTest(unittest.TestCase):
+    """P3:close() 摘除自己的心跳 —— 否则优雅退出的 worker 心跳残留到 dead_after 过期,
+    期间 reaper 都把它当'活着',推迟对其残留的判定。"""
+
+    def test_close_removes_own_heartbeat(self):
+        client = fakeredis.FakeRedis(decode_responses=True)
+        rq = RedisQueue(client, worker_id="w1")
+        rq.heartbeat()
+        self.assertIsNotNone(client.zscore("ops:queue:workers", "w1"))
+        rq.close()
+        self.assertIsNone(client.zscore("ops:queue:workers", "w1"))
+
+
 class QueueAuditTrailTest(unittest.TestCase):
     """P2-8:dlq_requeue 与 reaper 回灌/判死写入 audit hash chain(本地链,无网络依赖)。"""
 
