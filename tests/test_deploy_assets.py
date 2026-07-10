@@ -61,6 +61,21 @@ def test_worker_metrics_scrape_paths_are_documented() -> None:
     assert "OPS_METRICS_FILE" in worker
 
 
+def test_pdb_protects_ingress_and_worker() -> None:
+    # P2-9:节点排空/滚动升级时 ingress 与 worker 至少各保 1 副本,防止入口/消费全灭
+    docs = _load_yaml_documents(K8S_DIR / "pdb.yaml")
+    pdbs = {doc["metadata"]["name"]: doc for doc in docs if doc["kind"] == "PodDisruptionBudget"}
+    assert set(pdbs) == {"ops-agent-ingress", "ops-agent-worker"}
+    for name, doc in pdbs.items():
+        assert doc["apiVersion"] == "policy/v1"
+        assert doc["spec"]["minAvailable"] == 1, name
+        labels = doc["spec"]["selector"]["matchLabels"]
+        assert labels["app"] == "ops-agent"
+        assert labels["component"] in {"ingress", "worker"}
+    kustomization = _load_yaml_documents(K8S_DIR / "kustomization.yaml")[0]
+    assert "pdb.yaml" in kustomization["resources"]  # 别忘了挂进 apply 清单
+
+
 def test_prometheus_alerts_are_parseable_and_actionable() -> None:
     rules_file = PROM_DIR / "ops-agent-alerts.yml"
     alert_config = _load_yaml_documents(rules_file)[0]
