@@ -490,6 +490,10 @@ class RedisQueue:
             stats["requeued"] += 1
         elif outcome == "dead":
             stats["dead"] += 1
+        elif outcome == "lost":
+            # hash 在上面 _load 与 fail_or_retry 之间蒸发(P1-4③):jobs_lost_total 已由
+            # fail_or_retry 计数,这里补 stats,否则 reaper 日志/汇总漏报丢单
+            stats["lost"] += 1
 
     def retry_size(self) -> int:
         return int(self._r.zcard(self._retry_key))

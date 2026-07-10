@@ -14,6 +14,7 @@ from typing import Any
 
 from ops_agent.budget import is_non_retryable
 from ops_agent.config import Settings, get_settings
+from ops_agent.metrics import METRICS
 from ops_agent.queue_backend import WorkerQueue
 from ops_agent.redisqueue import RedisQueue
 
@@ -36,8 +37,6 @@ def process_once(rq: WorkerQueue, handler: Any, timeout: int = 1) -> str | None:
     if job is None:
         # 取到了 job_id 但 hash 已不在(TTL 过期/被驱逐)→ 任务丢失。出队即静默跳过会"无声丢单",
         # 必须留痕 + 计指标 + 清 processing 登记(否则幽灵 id 永挂在途),便于告警/排查。
-        from ops_agent.metrics import METRICS
-
         logger.warning("job_id=%s 出队但 hash 缺失(TTL过期/驱逐),丢弃", job_id)
         METRICS.inc("jobs_lost_total")
         discard = getattr(rq, "discard", None)
@@ -46,8 +45,6 @@ def process_once(rq: WorkerQueue, handler: Any, timeout: int = 1) -> str | None:
         return None
     if not rq.mark_running(job_id):
         return None  # hash 在 get 与 mark 之间蒸发(P2-2 守卫已计 lost + 清登记)
-    from ops_agent.metrics import METRICS
-
     METRICS.add("workers_busy", 1, backend="redis")  # 在途 worker 数(利用率分子)
     started = time.monotonic()
     try:
@@ -77,6 +74,22 @@ def process_once(rq: WorkerQueue, handler: Any, timeout: int = 1) -> str | None:
         METRICS.add("workers_busy", -1, backend="redis")
 
 
+def _flush_metrics_file(path: Path | None) -> None:
+    """把累计指标原子落成 textfile(P1-4①,best-effort)。
+
+    complete 的 jobs_succeeded_total、finally 的 workers_busy-1、reaper 的
+    jobs_reaped/jobs_lost 都发生在 run_agent 内部 flush **之后** —— 只靠 run_agent
+    落盘,这些指标永远停在上一轮快照。消费循环/reaper 每轮结束补一次 flush,
+    空闲轮也 flush(否则 worker 闲下来后 workers_busy 等 gauge 冻结在旧值)。
+    """
+    if path is None:
+        return
+    try:
+        METRICS.write_textfile(path)
+    except OSError as exc:
+        logger.warning("指标 textfile 写入失败 %s: %s", path, exc)
+
+
 def _notify_succeeded(job: Any, result: dict) -> None:
     """succeeded 回调(P1-3,best-effort):只在 complete 确认本方是第一个终态写入者后投递。"""
     try:
@@ -98,10 +111,15 @@ def _touch_heartbeat(path: Path | None) -> None:
         logger.warning("心跳文件写入失败 %s: %s", path, exc)
 
 
-def _worker_loop(rq: WorkerQueue, handler: Any, stop: threading.Event) -> None:
+def _worker_loop(
+    rq: WorkerQueue,
+    handler: Any,
+    stop: threading.Event,
+    metrics_file: Path | None = None,
+) -> None:
     """消费循环。循环自身异常(如 Redis 断连)不终结 worker,但要**指数退避 + 日志限频**
     (P2-5):否则断连期间每秒热旋重连打满 CPU、异常栈刷爆日志。退避用 stop.wait 实现,
-    停机信号能立刻打断等待。"""
+    停机信号能立刻打断等待。每轮结束 flush 指标 textfile(P1-4①,含空闲轮)。"""
     failures = 0
     while not stop.is_set():
         try:
@@ -114,6 +132,8 @@ def _worker_loop(rq: WorkerQueue, handler: Any, stop: threading.Event) -> None:
             if failures <= 3 or failures % 10 == 0:
                 logger.exception("worker 循环异常(连续 %d 次),%.1fs 后重试", failures, delay)
             stop.wait(delay)
+        finally:
+            _flush_metrics_file(metrics_file)
 
 
 def _heartbeat_loop(rq: Any, stop: threading.Event, interval: float) -> None:
@@ -128,8 +148,11 @@ def _heartbeat_loop(rq: Any, stop: threading.Event, interval: float) -> None:
         stop.wait(interval)
 
 
-def _reaper_loop(rq: Any, stop: threading.Event, interval: float) -> None:
-    """崩溃回收循环(P1-1):启动先 reap 一次(接管上任 worker 的遗留),之后周期扫。"""
+def _reaper_loop(
+    rq: Any, stop: threading.Event, interval: float, metrics_file: Path | None = None
+) -> None:
+    """崩溃回收循环(P1-1):启动先 reap 一次(接管上任 worker 的遗留),之后周期扫。
+    每轮结束 flush 指标 textfile(P1-4①:jobs_reaped/jobs_lost 更新后立即可抓)。"""
     failures = 0
     while not stop.is_set():
         try:
@@ -146,6 +169,7 @@ def _reaper_loop(rq: Any, stop: threading.Event, interval: float) -> None:
             failures += 1
             if failures <= 3 or failures % 10 == 0:
                 logger.exception("reaper 异常(连续 %d 次)", failures)
+        _flush_metrics_file(metrics_file)
         stop.wait(interval)
 
 
@@ -156,16 +180,18 @@ def run(settings: Settings | None = None) -> None:
     rq = build_redis_queue(settings)
     # 复用诊断任务内核(注入全拒审批闸 + 回调)。直接 import jobs,解掉 worker→server 反向依赖。
     from ops_agent.jobs import diagnosis_job_handler
-    from ops_agent.metrics import METRICS
 
     worker_count = max(1, settings.ops_worker_count)
     METRICS.set("workers_total", worker_count, backend="redis")  # 利用率分母
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
+    metrics_file = settings.ops_metrics_file
     threads = [
         threading.Thread(
-            target=_worker_loop, args=(rq, diagnosis_job_handler, stop), name=f"worker-{i}"
+            target=_worker_loop,
+            args=(rq, diagnosis_job_handler, stop, metrics_file),
+            name=f"worker-{i}",
         )
         for i in range(worker_count)
     ]
@@ -173,7 +199,7 @@ def run(settings: Settings | None = None) -> None:
     threads.append(
         threading.Thread(
             target=_reaper_loop,
-            args=(rq, stop, max(1.0, settings.ops_reaper_interval_seconds)),
+            args=(rq, stop, max(1.0, settings.ops_reaper_interval_seconds), metrics_file),
             name="reaper",
         )
     )

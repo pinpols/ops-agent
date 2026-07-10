@@ -647,6 +647,64 @@ class NonRetryableWorkerTest(unittest.TestCase):
         self.assertEqual(rq.dlq_size(), 0)
 
 
+class MetricsFlushTest(unittest.TestCase):
+    """P1-4①:complete/finally/reaper 里更新的指标发生在 run_agent 内部 flush 之后 ——
+    消费循环与 reaper 每轮结束必须 flush textfile,空闲 worker 也要周期 flush。"""
+
+    def test_worker_loop_flushes_metrics_even_when_idle(self):
+        rq = MagicMock()
+        rq.consume.return_value = None  # 空闲:无任务
+
+        class _Stop:
+            def __init__(self):
+                self.n = 0
+
+            def is_set(self):
+                return self.n >= 3
+
+            def wait(self, t):
+                return False
+
+        stop = _Stop()
+        real = rq.consume
+
+        def consume(timeout=1):
+            stop.n += 1
+            return real(timeout=timeout)
+
+        rq.consume = consume
+        with tempfile.TemporaryDirectory() as tmp:
+            mf = Path(tmp) / "metrics.prom"
+            worker_main._worker_loop(rq, lambda j: {}, stop, metrics_file=mf)
+            self.assertTrue(mf.exists())  # 空闲轮也落盘
+            self.assertIn("ops_agent", mf.read_text())
+
+    def test_reaper_loop_flushes_metrics_each_round(self):
+        rq = MagicMock()
+        stop = threading.Event()
+        rq.reap.side_effect = lambda: (stop.set(), {"requeued": 1, "dead": 0, "lost": 0})[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            mf = Path(tmp) / "metrics.prom"
+            worker_main._reaper_loop(rq, stop, 0.01, metrics_file=mf)
+            self.assertTrue(mf.exists())
+
+    def test_flush_metrics_file_tolerates_write_errors(self):
+        # 只读路径 → 不抛,不崩循环
+        worker_main._flush_metrics_file(Path("/proc/definitely/not/writable/x.prom"))
+
+    def test_reap_one_records_lost_outcome_from_fail_or_retry(self):
+        # P1-4③:fail_or_retry 返回 lost(hash 在 _load 与 fail_or_retry 之间蒸发)时
+        # stats 不得漏记
+        rq = _rq()
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        stats = {"requeued": 0, "dead": 0, "lost": 0}
+        with patch.object(rq, "fail_or_retry", return_value="lost"):
+            rq._reap_one(job.id, stats, error="worker_crashed:w1")
+        self.assertEqual(stats["lost"], 1)
+
+
 class WorkerLoopBackoffTest(unittest.TestCase):
     """P2-5:Redis 断连时消费循环指数退避(响应 stop)+ 日志限频,不热旋不刷屏。"""
 

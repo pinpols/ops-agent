@@ -50,6 +50,17 @@ def test_k8s_default_images_do_not_use_latest_tag() -> None:
                 assert not image.endswith(":latest"), f"{path} uses mutable latest image tag"
 
 
+def test_worker_metrics_scrape_paths_are_documented() -> None:
+    # P1-4②:OPS_METRICS_FILE 落在 emptyDir 无人抓取 → README 与 worker.yaml 必须
+    # 写清两种接法(node_exporter textfile hostPath / sidecar exporter)
+    readme = (K8S_DIR / "README.md").read_text(encoding="utf-8")
+    assert "node_exporter" in readme and "sidecar" in readme
+    assert "OPS_METRICS_FILE" in readme
+    worker = (K8S_DIR / "worker.yaml").read_text(encoding="utf-8")
+    assert "hostPath" in worker  # volumes 段给出 textfile collector 接法示例
+    assert "OPS_METRICS_FILE" in worker
+
+
 def test_prometheus_alerts_are_parseable_and_actionable() -> None:
     rules_file = PROM_DIR / "ops-agent-alerts.yml"
     alert_config = _load_yaml_documents(rules_file)[0]
