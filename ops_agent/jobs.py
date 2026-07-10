@@ -14,7 +14,7 @@ from typing import Any
 from ops_agent.audit import audit_actor
 from ops_agent.budget import BudgetExceeded
 from ops_agent.metrics import METRICS
-from ops_agent.prompts import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
+from ops_agent.prompts import contains_fence_marker
 
 logger = logging.getLogger("ops_agent.jobs")
 
@@ -55,7 +55,8 @@ def _validate_question_target(
     # P2-8:question 未过围栏直接进系统语境,是注入通道(设计边界,见 README/runbook:
     # 告警模板禁止内嵌原始日志内容)。纵深防御:至少拒绝内嵌围栏定界符的 question ——
     # 攻击者借它伪造"数据段结束"标记,把后续注入文字抬升为指令。
-    if UNTRUSTED_OPEN in question or UNTRUSTED_CLOSE in question:
+    # P2-7:用变体感知匹配(大小写/零宽格式字符插入/全角尖括号),精确子串可被轻易绕过。
+    if contains_fence_marker(question):
         return (
             None,
             None,
