@@ -235,12 +235,22 @@ def serve(
         logger.info("收到停止信号,优雅退出")
     finally:
         if job_queue is not None:
-            # memory 后端有内置 worker → shutdown 排空;redis 后端 ingress 只需 close 连接。
-            closer = getattr(job_queue, "shutdown", None) or getattr(job_queue, "close", None)
-            if closer is not None:
-                closer()
+            _close_job_queue(job_queue, settings)
         httpd.shutdown()
         httpd.server_close()
+
+
+def _close_job_queue(job_queue: Any, settings: Any) -> None:
+    """停机收尾:memory 后端 shutdown 排空(窗口=单次 run 预算+10s,P2-6,与 redis worker
+    的排空 deadline 一致 —— 默认 10s 会截断可长至 max_run 的在途诊断);redis 后端
+    ingress 不跑 worker,只需 close 连接。"""
+    shutdown = getattr(job_queue, "shutdown", None)
+    if shutdown is not None:
+        shutdown(timeout=float(settings.ops_max_run_seconds) + 10)
+        return
+    close = getattr(job_queue, "close", None)
+    if close is not None:
+        close()
 
 
 def _raise_keyboard_interrupt(signum: int, frame: Any) -> None:

@@ -200,5 +200,119 @@ class JobQueueTest(unittest.TestCase):
         self.assertEqual(len(jq._timers), 0)
 
 
+class MemoryDeadPathCallbackTest(unittest.TestCase):
+    """P2-6:memory 后端三条 dead 路径(重试入队满 / 停机竞态 / shutdown 取消 Timer)
+    此前不发终局 failed 回调 → 下游等不到失败通知。与 redis 后端对齐。"""
+
+    def test_retry_queue_full_posts_failed_callback(self):
+        calls = []
+        with patch(
+            "ops_agent.callback._post_callback",
+            side_effect=lambda job, **kw: calls.append((job, kw)),
+        ):
+            jq = JobQueue(lambda job: {}, workers=1, max_queue=1)
+            try:
+                job = jq.submit("x")
+                _wait(jq, job.id)
+                jq.get(job.id).status = QUEUED  # 摆回非终态,模拟重试中
+                # 手工造"重试入队时队列已满":塞满队列后触发 _requeue
+                jq._q.put_nowait("occupier")
+                jq._requeue(job.id)
+            finally:
+                jq._q.get_nowait()
+                jq.shutdown()
+        failed = [kw for _job, kw in calls if kw.get("status") == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("retry_queue_full", failed[0].get("error") or "")
+
+    def test_shutdown_cancelled_retry_posts_failed_callback(self):
+        calls = []
+
+        def boom(job):
+            raise RuntimeError("nope")
+
+        with patch(
+            "ops_agent.callback._post_callback",
+            side_effect=lambda job, **kw: calls.append((job, kw)),
+        ):
+            # 大 retry 延迟:Timer 挂起时 shutdown → 取消并标终态,必须发终局 failed
+            jq = JobQueue(boom, workers=1, max_retries=1, retry_base_seconds=60)
+            job = jq.submit("x")
+            deadline = time.time() + 3
+            while time.time() < deadline and not jq._timers:
+                time.sleep(0.01)
+            jq.shutdown()
+        self.assertEqual(jq.get(job.id).status, FAILED)
+        self.assertEqual(jq.get(job.id).error, "shutdown_retry_cancelled")
+        failed = [kw for _job, kw in calls if kw.get("status") == "failed"]
+        self.assertEqual(len(failed), 1)
+
+    def test_stop_race_requeue_after_delay_posts_failed_callback(self):
+        calls = []
+        with patch(
+            "ops_agent.callback._post_callback",
+            side_effect=lambda job, **kw: calls.append((job, kw)),
+        ):
+            jq = JobQueue(lambda job: {}, workers=1)
+            try:
+                job = jq.submit("x")
+                _wait(jq, job.id)
+                jq.get(job.id).status = QUEUED  # 摆回非终态,模拟重试中
+                jq._stop.set()  # 停机竞态窗:排 Timer 前 stop 已置位
+                jq._requeue_after_delay(job.id, 60)
+            finally:
+                jq._stop.clear()
+                jq.shutdown()
+        self.assertEqual(jq.get(job.id).status, FAILED)
+        failed = [kw for _job, kw in calls if kw.get("status") == "failed"]
+        self.assertEqual(len(failed), 1)
+
+    def test_mark_failed_locked_is_idempotent_no_double_callback(self):
+        # 已终态的任务再走 dead 路径不得二次回调/二次计数
+        calls = []
+        with patch(
+            "ops_agent.callback._post_callback",
+            side_effect=lambda job, **kw: calls.append((job, kw)),
+        ):
+            jq = JobQueue(lambda job: {}, workers=1)
+            try:
+                job = jq.submit("x")
+                _wait(jq, job.id)  # SUCCEEDED
+                jq._stop.set()
+                jq._requeue_after_delay(job.id, 60)  # 已终态 → no-op
+            finally:
+                jq._stop.clear()
+                jq.shutdown()
+        self.assertEqual(jq.get(job.id).status, SUCCEEDED)
+        failed = [kw for _job, kw in calls if kw.get("status") == "failed"]
+        self.assertEqual(failed, [])
+
+
+class ServerShutdownWindowTest(unittest.TestCase):
+    """P2-6:memory 后端 shutdown join 默认 10s 会截断在途诊断(可长至 max_run);
+    server 停机须传 max_run+10 的排空窗口,与 redis worker 一致。"""
+
+    def test_close_job_queue_passes_run_budget_window(self):
+        from unittest.mock import MagicMock
+
+        from ops_agent.config import Settings
+        from ops_agent.server import _close_job_queue
+
+        settings = MagicMock(spec=Settings)
+        settings.ops_max_run_seconds = 120.0
+        jq = MagicMock(spec=["shutdown"])
+        _close_job_queue(jq, settings)
+        jq.shutdown.assert_called_once_with(timeout=130.0)
+
+    def test_close_job_queue_falls_back_to_close_for_redis(self):
+        from unittest.mock import MagicMock
+
+        from ops_agent.server import _close_job_queue
+
+        rq = MagicMock(spec=["close"])
+        _close_job_queue(rq, MagicMock())
+        rq.close.assert_called_once_with()
+
+
 if __name__ == "__main__":
     unittest.main()
