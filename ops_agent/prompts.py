@@ -18,7 +18,10 @@ UNTRUSTED_CLOSE = "UNTRUSTED_TOOL_OUTPUT>>>"
 # 而模型在语义上仍可能把变体当围栏边界。匹配统一走"变体感知"正则:
 # 每个标记字符间允许任意格式字符,尖括号接受全角等价,忽略大小写。
 # bandit B613:双向/格式控制字符一律用显式转义写出,源码中不出现字面不可见字符
-_FORMAT_CHARS = "\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u206a-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0"
+_FORMAT_CHARS = (
+    "\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180e\u200b-\u200f"
+    "\u202a-\u202e\u2060-\u2064\u206a-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0"
+)
 _FORMAT_GAP = f"[{_FORMAT_CHARS}]*"
 _CONFUSABLES = {"<": "[<＜‹〈]", ">": "[>＞›〉]", "_": "[_＿]"}
 
