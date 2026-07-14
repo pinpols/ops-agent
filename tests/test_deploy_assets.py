@@ -51,13 +51,13 @@ def test_k8s_default_images_do_not_use_latest_tag() -> None:
 
 
 def test_worker_metrics_scrape_paths_are_documented() -> None:
-    # P1-4②:OPS_METRICS_FILE 落在 emptyDir 无人抓取 → README 与 worker.yaml 必须
-    # 写清两种接法(node_exporter textfile hostPath / sidecar exporter)
+    # worker 默认 HTTP 暴露 /metrics;OPS_METRICS_FILE 只作为本地 textfile 副本。
     readme = (K8S_DIR / "README.md").read_text(encoding="utf-8")
-    assert "node_exporter" in readme and "sidecar" in readme
+    assert "OPS_WORKER_METRICS_PORT" in readme
     assert "OPS_METRICS_FILE" in readme
     worker = (K8S_DIR / "worker.yaml").read_text(encoding="utf-8")
-    assert "hostPath" in worker  # volumes 段给出 textfile collector 接法示例
+    assert 'prometheus.io/port: "9091"' in worker
+    assert "containerPort: 9091" in worker
     assert "OPS_METRICS_FILE" in worker
 
 

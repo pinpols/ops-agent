@@ -70,12 +70,12 @@
 - ☐ 企业级中心化存储(PG/对象存储)+ 数据驻留/导出合规:SQLite 是单机基线,跨实例聚合是 T2 后续
 
 ## 9. 测试深度
-- ✅ 258+ 测试 / coverage gate 70%;新模块均带单测 + serve 端到端起真 HTTP
+- ✅ 380+ 测试 / coverage gate 70%;新模块均带单测 + serve 端到端起真 HTTP
 - ✅ 故障注入(队列满/Redis 断/worker 崩/callback 超时)+ 基础负载脚本(`scripts/loadtest.py`)
 - ◑ LLM 边界模块(graph/investigate)仍偏薄;故障注入用 fake,**真集群混沌/负载实测待 staging**
 
 ## 10. 发布与版本
-- ✅ 包版本 `0.2.0`;prompt 版本化;`CHANGELOG.md`
+- ✅ 包版本 `0.2.1`;prompt 版本化;`CHANGELOG.md`
 - ✅ eval 回归闸(`--fail-on-regression` 配 baseline / `--fail-under` 阈值)
 - ☐ prompt 制品化回滚流程(T2,随多版本并存需求)
 
@@ -85,7 +85,7 @@
 1. `OPS_PROFILE=prod`,`ops-agent doctor` 全绿(只读 DB 用户、日志只读挂载、exec 关)
 2. 配 `OPS_WEBHOOK_TOKEN`(或 `_FILE`),确认 `/diagnose` 无 token 返 401
 3. 配 `OPS_REDACTION_RULES_FILE` 覆盖业务自定义敏感字段(工单号、租户号、内部员工号等)
-4. 配 `targets.toml`(只读 pg_dsn + metrics_url),`OPS_METRICS_FILE` 指向可写卷
+4. 配 `targets.toml`(只读 pg_dsn + metrics_url),worker 默认 `OPS_WORKER_METRICS_PORT=9091`
 5. 镜像跑起后 `/healthz` 200、`/metrics` 有计数
 6. CI 绿(lint/format/mypy/测试 70% 闸/离线 eval 闸/安全扫描/SBOM)
 

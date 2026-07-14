@@ -127,6 +127,7 @@ ops-agent serve --port 8080          # GET /healthz、GET /metrics、POST /diagn
 
 curl localhost:8080/healthz                          # {"status":"ok",...}
 curl -H "Authorization: Bearer $OPS_WEBHOOK_TOKEN" \
+     -H "Idempotency-Key: alertmanager/fingerprint-123" \
      -d '{"question":"worker-import 为什么失败?","target":"file-batch-system"}' \
      localhost:8080/diagnose          # 只读诊断(模型即便想 restart 也被全拒)
 ```
@@ -135,6 +136,8 @@ curl -H "Authorization: Bearer $OPS_WEBHOOK_TOKEN" \
   `--target <name>` 或 webhook `{"target": "..."}` 选用;不配则回退单目标 env。
 - **指标**:`query_metrics` 只读查 Prometheus;agent 自身指标走 `/metrics` 或 `OPS_METRICS_FILE`。
 - **预算闸**:`OPS_MAX_RUN_SECONDS` / `OPS_MAX_RUN_TOKENS` 防绕圈烧钱。
+- **事件幂等**:异步模式支持 `event_id` / `idempotency_key` / `fingerprint` 字段,
+  也支持 `Idempotency-Key` 或 `X-Ops-Event-Id` header;重复告警会返回同一个 job。
 - **⚠️ webhook `question` 是未围栏输入(设计边界)**:它作为"用户问题"直达模型,不像工具输出
   那样包不可信围栏 —— **告警模板禁止内嵌原始日志内容**(日志属不可信数据,应由 agent 经
   `read_logs` 等工具自行取证,取证内容才会被围栏+脱敏)。服务端对含围栏定界符的 question

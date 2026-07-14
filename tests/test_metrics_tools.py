@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from ops_agent.metrics_tools import query_metrics_result
+from ops_agent.metrics_tools import _RESPONSE_CAP_BYTES, query_metrics_result
 from ops_agent.targets import Target
 
 
@@ -90,6 +90,25 @@ class QueryMetricsTest(unittest.TestCase):
             r = query_metrics_result("up")
         self.assertTrue(r.metadata["truncated"])
         self.assertEqual(len(json.loads(r.content)), 50)
+
+    def test_rejects_oversized_json_response_before_parse(self):
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        with (
+            patch("ops_agent.metrics_tools.resolve_target", return_value=_TARGET),
+            patch(
+                "ops_agent.metrics_tools.urllib.request.urlopen",
+                return_value=_Resp(b"{" + b'"x":' + b'"a"' * _RESPONSE_CAP_BYTES),
+            ),
+        ):
+            r = query_metrics_result("up")
+        self.assertFalse(r.ok)
+        self.assertIn("响应过大", r.error)
 
 
 if __name__ == "__main__":

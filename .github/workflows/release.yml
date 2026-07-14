@@ -9,38 +9,54 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - name: Bump version
+      - name: Validate release version
         env:
           NEW_VERSION: ${{ github.event.inputs.version }}
         run: |
-          sed -i "s/version = .*/version = \"$NEW_VERSION\"/" pyproject.toml
-          sed -i "s/^## \\[Unreleased\\]/## [$NEW_VERSION] - $(date +%Y-%m-%d)/" CHANGELOG.md
+          PYPROJECT_VERSION=$(python - <<'PY'
+          import tomllib
+          print(tomllib.loads(open("pyproject.toml", "rb").read().decode())["project"]["version"])
+          PY
+          )
+          PACKAGE_VERSION=$(python - <<'PY'
+          import re
+          print(re.search(r'__version__ = "([^"]+)"', open("ops_agent/__init__.py").read()).group(1))
+          PY
+          )
+          test "$PYPROJECT_VERSION" = "$NEW_VERSION"
+          test "$PACKAGE_VERSION" = "$NEW_VERSION"
+          grep -q "^## $NEW_VERSION " CHANGELOG.md
+      - name: Create and push tag
+        env:
+          NEW_VERSION: ${{ github.event.inputs.version }}
+        run: |
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
-          git add pyproject.toml CHANGELOG.md
-          git commit -m "chore: release v$NEW_VERSION"
+          git diff --exit-code
           git tag -a "v$NEW_VERSION" -m "Release $NEW_VERSION"
-          git push origin HEAD:main --force-with-lease
           git push origin "v$NEW_VERSION"
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ github.event.inputs.version }}
         run: |
-          NOTES=$(sed -n "/^## \[$VERSION\]/,/^## /p" CHANGELOG.md | head -n -1 | tail -n +2)
+          NOTES=$(awk -v version="$VERSION" '
+            $0 ~ "^## " version " " {capture=1; next}
+            capture && /^## / {exit}
+            capture {print}
+          ' CHANGELOG.md)
           gh release create "v$VERSION" \
             --title "v$VERSION" \
             --notes "$NOTES" \

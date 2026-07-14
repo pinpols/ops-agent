@@ -26,6 +26,7 @@ import os
 import socket
 import time
 import uuid
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -33,12 +34,14 @@ if TYPE_CHECKING:
 
     from ops_agent.config import Settings
 
-from ops_agent.jobqueue import FAILED, QUEUED, RUNNING, SUCCEEDED, DiagnosisJob
+from ops_agent.jobqueue import FAILED, QUEUED, RUNNING, SUCCEEDED, DiagnosisJob, _normalize_event_id
 from ops_agent.metrics import METRICS
 
 logger = logging.getLogger("ops_agent.redisqueue")
 
 _JOB_PREFIX = "ops:job:"
+_CALLBACK_MAX_ATTEMPTS = 5
+_PROMOTE_BATCH_SIZE = 100
 
 
 def _default_worker_id() -> str:
@@ -82,6 +85,10 @@ class RedisQueue:
         self._processing_prefix = f"{queue_key}:processing:"
         self._processing_key = self._processing_prefix + self._worker_id
         self._workers_key = f"{queue_key}:workers"
+        self._dedupe_prefix = f"{queue_key}:event:"
+        self._callback_outbox_key = f"{queue_key}:callbacks"
+        self._callback_retry_key = f"{queue_key}:callbacks:retry"
+        self._callback_dlq_key = f"{queue_key}:callbacks:dlq"
         self._worker_dead_after_seconds = max(1.0, worker_dead_after_seconds)
         self._stale_running_seconds = max(1.0, stale_running_seconds)
         # P2-8:队列运维动作(DLQ 回灌/reaper 回收)审计链;未配则不留痕(测试/嵌入场景)
@@ -118,12 +125,16 @@ class RedisQueue:
     def _job_key(self, job_id: str) -> str:
         return _JOB_PREFIX + job_id
 
+    def _dedupe_key(self, event_id: str) -> str:
+        return self._dedupe_prefix + event_id
+
     def _mapping(self, job: DiagnosisJob) -> dict[str, str]:
         return {
             "question": job.question,
             "trace_id": job.trace_id,
             "target": job.target or "",
             "actor": job.actor or "",
+            "event_id": job.event_id or "",
             "status": job.status,
             "result": json.dumps(job.result) if job.result is not None else "",
             "error": job.error or "",
@@ -146,6 +157,7 @@ class RedisQueue:
             trace_id=h.get("trace_id") or job_id,
             target=h.get("target") or None,
             actor=h.get("actor") or None,
+            event_id=h.get("event_id") or None,
             status=h.get("status", QUEUED),
             result=json.loads(h["result"]) if h.get("result") else None,
             error=h.get("error") or None,
@@ -160,28 +172,55 @@ class RedisQueue:
         target: str | None = None,
         trace_id: str | None = None,
         actor: str | None = None,
+        event_id: str | None = None,
     ) -> DiagnosisJob | None:
         """入队。队列长度达上限 → 返回 None(背压)。
 
         **原子**:WATCH 队列 → 校验长度 → MULTI(hset+expire+lpush)EXEC。多 ingress 并发时
         背压是硬上限(不会超),且 store 与 lpush 同事务提交,不会留"有 hash 无队列项"的孤儿。
         """
+        event_id = _normalize_event_id(event_id)
+        if event_id:
+            existing_id = self._r.get(self._dedupe_key(event_id))
+            if existing_id:
+                existing = self._load(existing_id)
+                if existing is not None:
+                    METRICS.inc("jobs_deduplicated_total", backend="redis")
+                    return existing
+                self._r.delete(self._dedupe_key(event_id))
         job = DiagnosisJob(
             id=uuid.uuid4().hex,
             question=question,
             trace_id=trace_id or uuid.uuid4().hex,
             target=target,
             actor=actor,
+            event_id=event_id,
         )
         job_key = self._job_key(job.id)
         mapping = self._mapping(job)
+        dedupe_key = self._dedupe_key(event_id) if event_id else None
         from redis.exceptions import WatchError  # 延迟 import:redis 是可选依赖
 
         with self._r.pipeline() as pipe:
             while True:
                 try:
-                    pipe.watch(self._queue_key)
-                    if pipe.llen(self._queue_key) >= self._max_queue:
+                    watch_keys = [self._queue_key, self._retry_key, self._dlq_key]
+                    if dedupe_key:
+                        watch_keys.append(dedupe_key)
+                    pipe.watch(*watch_keys)
+                    if dedupe_key:
+                        existing_id = pipe.get(dedupe_key)
+                        if existing_id:
+                            existing = self._load(existing_id)
+                            if existing is not None:
+                                pipe.unwatch()
+                                METRICS.inc("jobs_deduplicated_total", backend="redis")
+                                return existing
+                            pipe.multi()
+                            pipe.delete(dedupe_key)
+                            pipe.execute()
+                            continue
+                    if self._total_backlog() >= self._max_queue:
                         pipe.reset()
                         METRICS.inc("jobs_rejected_total")
                         self.update_queue_metrics()
@@ -189,6 +228,8 @@ class RedisQueue:
                     pipe.multi()
                     pipe.hset(job_key, mapping=mapping)
                     pipe.expire(job_key, self._job_ttl)
+                    if dedupe_key:
+                        pipe.set(dedupe_key, job.id, ex=self._job_ttl)
                     pipe.lpush(self._queue_key, job.id)
                     pipe.execute()
                     break
@@ -211,19 +252,137 @@ class RedisQueue:
     def qsize(self) -> int:
         return int(self._r.llen(self._queue_key))
 
+    def processing_size(self) -> int:
+        total = 0
+        for key in list(self._r.scan_iter(match=self._processing_prefix + "*")):
+            total += int(self._r.llen(key))
+        return total
+
+    def _total_backlog(self) -> int:
+        return self.qsize() + self.retry_size() + self.dlq_size() + self.processing_size()
+
     def update_queue_metrics(self) -> None:
         depth = self.qsize()
+        processing = self.processing_size()
+        retry = self.retry_size()
+        dlq = self.dlq_size()
+        backlog = depth + retry + dlq + processing
         METRICS.set("queue_depth", depth, backend="redis")
         # 重试积压(到期前挂在 delayed zset)+ 死信堆积:都是积压排查的关键水位
-        METRICS.set("retry_backlog", self.retry_size(), backend="redis")
-        METRICS.set("dlq_size", self.dlq_size(), backend="redis")
+        METRICS.set("retry_backlog", retry, backend="redis")
+        METRICS.set("processing_backlog", processing, backend="redis")
+        METRICS.set("dlq_size", dlq, backend="redis")
+        METRICS.set("queue_backlog_total", backlog, backend="redis")
         if self._queue_depth_alert_threshold > 0:
             METRICS.set("queue_depth_alert_threshold", self._queue_depth_alert_threshold)
             METRICS.set(
                 "queue_depth_over_threshold",
-                1.0 if depth >= self._queue_depth_alert_threshold else 0.0,
+                1.0 if backlog >= self._queue_depth_alert_threshold else 0.0,
                 backend="redis",
             )
+
+    def _callback_event(
+        self,
+        *,
+        job_id: str,
+        trace_id: str | None,
+        status: str,
+        attempts: int,
+        result: dict | None = None,
+        error: str | None = None,
+    ) -> str:
+        return json.dumps(
+            {
+                "event_id": uuid.uuid4().hex,
+                "job_id": job_id,
+                "trace_id": trace_id or job_id,
+                "status": status,
+                "attempts": attempts,
+                "result": result,
+                "error": error,
+                "callback_attempts": 0,
+            },
+            ensure_ascii=False,
+        )
+
+    def deliver_due_callbacks(self, limit: int = 10, now: float | None = None) -> dict[str, int]:
+        """投递 Redis callback outbox。
+
+        complete/fail_or_retry 把终局事件和 job 状态写在同一事务里;这里独立投递。
+        投递失败会进入 callback retry zset,指数退避后重试;超过上限进 callback DLQ。
+        """
+        now = time.time() if now is None else now
+        self._promote_due_callbacks(now=now, limit=limit)
+        stats = {"sent": 0, "retried": 0, "dead": 0}
+        for _ in range(max(0, limit)):
+            raw = self._r.rpop(self._callback_outbox_key)
+            if raw is None:
+                break
+            event = json.loads(raw)
+            if self._send_callback_event(event):
+                stats["sent"] += 1
+                METRICS.inc("callbacks_succeeded_total", backend="redis")
+                continue
+            attempts = int(event.get("callback_attempts") or 0) + 1
+            event["callback_attempts"] = attempts
+            if attempts >= _CALLBACK_MAX_ATTEMPTS:
+                self._r.lpush(self._callback_dlq_key, json.dumps(event, ensure_ascii=False))
+                stats["dead"] += 1
+                METRICS.inc("callbacks_failed_total", backend="redis")
+            else:
+                retry_at = now + min(300.0, 2 ** (attempts - 1))
+                self._r.zadd(
+                    self._callback_retry_key, {json.dumps(event, ensure_ascii=False): retry_at}
+                )
+                stats["retried"] += 1
+                METRICS.inc("callbacks_retried_total", backend="redis")
+        return stats
+
+    def _promote_due_callbacks(self, *, now: float, limit: int) -> int:
+        due = list(self._r.zrangebyscore(self._callback_retry_key, 0, now, start=0, num=limit))
+        if not due:
+            return 0
+        from redis.exceptions import WatchError
+
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(self._callback_retry_key)
+                    due = list(
+                        pipe.zrangebyscore(self._callback_retry_key, 0, now, start=0, num=limit)
+                    )
+                    if not due:
+                        pipe.unwatch()
+                        return 0
+                    pipe.multi()
+                    pipe.zrem(self._callback_retry_key, *due)
+                    for raw in due:
+                        pipe.lpush(self._callback_outbox_key, raw)
+                    pipe.execute()
+                    return len(due)
+                except WatchError:
+                    continue
+
+    def _send_callback_event(self, event: dict[str, Any]) -> bool:
+        try:
+            from ops_agent.callback import _post_callback
+
+            job = SimpleNamespace(
+                id=event["job_id"],
+                trace_id=event.get("trace_id") or event["job_id"],
+                attempts=event.get("attempts"),
+            )
+            return bool(
+                _post_callback(
+                    job,
+                    status=event["status"],
+                    result=event.get("result"),
+                    error=event.get("error"),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - outbox 投递失败按 retry 处理
+            logger.warning("callback outbox 投递异常 job_id=%s: %s", event.get("job_id"), exc)
+            return False
 
     # ── worker(serve-worker)──────────────────────────────────
     def consume(self, timeout: int = 1) -> str | None:
@@ -314,18 +473,29 @@ class RedisQueue:
                         pipe.unwatch()
                         self.discard(job_id)  # 在途登记别悬空
                         return False  # 哈希已丢失 / 已终态 → 不覆写、不复活
+                    trace_id = pipe.hget(key, "trace_id")
+                    attempts = int(pipe.hget(key, "attempts") or 0)
+                    callback_event = self._callback_event(
+                        job_id=job_id,
+                        trace_id=trace_id,
+                        status="succeeded",
+                        attempts=attempts,
+                        result=result,
+                    )
                     pipe.multi()
                     pipe.hset(
                         key,
                         mapping={"status": SUCCEEDED, "result": json.dumps(result), "error": ""},
                     )
                     pipe.lrem(self._processing_key, 1, job_id)  # 在途登记随终态同事务摘除
+                    pipe.lpush(self._callback_outbox_key, callback_event)
                     pipe.execute()
                     break
                 except WatchError:
                     continue
         METRICS.inc("jobs_succeeded_total")
         self.update_queue_metrics()
+        self.deliver_due_callbacks(limit=1)
         return True
 
     def fail_or_retry(
@@ -374,6 +544,7 @@ class RedisQueue:
                         if status != RUNNING or current != expected_running_since:
                             pipe.unwatch()
                             return "skipped"  # 已被别的 reaper 回收 / 已被新 worker 领走
+                    trace_id = pipe.hget(key, "trace_id")
                     attempts = int(pipe.hget(key, "attempts") or 0) + 1
                     if retryable and attempts <= self._max_retries:
                         retry_after = time.time() + self._retry_delay(attempts)
@@ -399,6 +570,16 @@ class RedisQueue:
                         )
                         pipe.lpush(self._dlq_key, job_id)
                         pipe.lrem(self._processing_key, 1, job_id)
+                        pipe.lpush(
+                            self._callback_outbox_key,
+                            self._callback_event(
+                                job_id=job_id,
+                                trace_id=trace_id,
+                                status="failed",
+                                attempts=attempts,
+                                error=error,
+                            ),
+                        )
                         pipe.execute()
                         outcome, metric = "dead", "jobs_failed_total"
                     break
@@ -407,7 +588,7 @@ class RedisQueue:
         METRICS.inc(metric)
         self.update_queue_metrics()
         if outcome == "dead":
-            self._notify_failed(job_id)  # P2-3:只在终局失败投递 failed 回调(带 attempts)
+            self.deliver_due_callbacks(limit=1)
         return outcome
 
     def _notify_failed(self, job_id: str) -> None:
@@ -441,7 +622,11 @@ class RedisQueue:
             while True:
                 try:
                     pipe.watch(self._retry_key)
-                    job_ids = list(pipe.zrangebyscore(self._retry_key, 0, now))
+                    job_ids = list(
+                        pipe.zrangebyscore(
+                            self._retry_key, 0, now, start=0, num=_PROMOTE_BATCH_SIZE
+                        )
+                    )
                     if not job_ids:
                         pipe.unwatch()
                         return 0

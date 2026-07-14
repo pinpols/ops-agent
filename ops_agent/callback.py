@@ -26,8 +26,8 @@ def _post_callback(
     status: str,
     result: dict[str, Any] | None = None,
     error: str | None = None,
-) -> None:
-    """配了 OPS_CALLBACK_URL 就把结果 POST 过去(成功/失败均回调,best-effort,失败只 warn)。"""
+) -> bool:
+    """配了 OPS_CALLBACK_URL 就把结果 POST 过去。返回是否无需继续重试。"""
     settings = get_settings()
     url = settings.ops_callback_url
     allowed, reason = _callback_url_allowed(url, settings)
@@ -39,9 +39,9 @@ def _post_callback(
                 job.trace_id,
                 reason,
             )
-        return
+        return True
     if url is None:
-        return
+        return True
     import urllib.request
 
     # prod 下 error 字段集中脱敏(异常文本可能含路径/DSN 等内部细节),与 _callback_error 同姿态;
@@ -67,10 +67,12 @@ def _post_callback(
                 url, data=body, headers={"Content-Type": "application/json"}, method="POST"
             )
             urllib.request.urlopen(req, timeout=10).close()  # noqa: S310  # nosec B310
+        return True
     except Exception as exc:  # noqa: BLE001 - 回调是 best-effort,失败不该影响诊断结果
         logger.warning(
             "回调投递失败 job_id=%s trace_id=%s url=%s: %s", job.id, job.trace_id, url, exc
         )
+        return False
 
 
 def _callback_error(exc: Exception) -> str:

@@ -248,6 +248,26 @@ class AsyncDiagnoseHttpTest(unittest.TestCase):
         self.assertEqual(final["result"]["trace_id"], "trace-http")
         self.assertEqual(final["result"]["diagnosis"]["severity"], "WARNING")
 
+    def test_async_idempotency_key_returns_same_job(self):
+        body = b'{"question":"WARNING","target":"fbs","trace_id":"trace-http"}'
+        headers = {"Authorization": "Bearer tok", "Idempotency-Key": "alert-http-1"}
+        first_req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/diagnose",
+            data=body,
+            method="POST",
+            headers=headers,
+        )
+        second_req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/diagnose",
+            data=body,
+            method="POST",
+            headers=headers,
+        )
+        first = json.loads(urllib.request.urlopen(first_req, timeout=5).read())
+        second = json.loads(urllib.request.urlopen(second_req, timeout=5).read())
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertEqual(first["event_id"], "alert-http-1")
+
     def test_unknown_job_404(self):
         # 带正确 token → 走到存在性判断,未知 job 返 404
         req = urllib.request.Request(

@@ -22,6 +22,7 @@ _MAX_QUESTION_CHARS = 8192
 _TARGET_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _ACTOR_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,128}$")
 _TRACE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_.:@/-]{1,256}$")
 
 
 def _deny_all_approver(tool_name: str, tool_input: dict) -> bool:
@@ -35,6 +36,30 @@ def _payload_trace_id(payload: dict[str, Any]) -> str:
     if isinstance(value, str) and _TRACE_ID_RE.match(value.strip()):
         return value.strip()
     return uuid.uuid4().hex
+
+
+def _payload_event_id(payload: dict[str, Any], header_value: str | None = None) -> str | None:
+    """提取事件幂等键。显式 event_id/idempotency_key 优先,其次 alert fingerprint。"""
+    candidates: list[Any] = [
+        header_value,
+        payload.get("event_id"),
+        payload.get("idempotency_key"),
+        payload.get("fingerprint"),
+    ]
+    event = payload.get("event")
+    if isinstance(event, dict):
+        candidates.extend([event.get("id"), event.get("event_id"), event.get("fingerprint")])
+    source = payload.get("source")
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            value = candidate.strip()
+            if value and _EVENT_ID_RE.match(value):
+                if isinstance(source, str) and candidate == payload.get("fingerprint"):
+                    source_value = source.strip()
+                    if source_value and _EVENT_ID_RE.match(source_value):
+                        return f"{source_value}/{value}"[:256]
+                return value
+    return None
 
 
 def _request_actor(value: str | None) -> str:

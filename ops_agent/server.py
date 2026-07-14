@@ -32,6 +32,7 @@ from ops_agent.config import get_settings
 from ops_agent.jobs import _MAX_QUESTION_CHARS as _MAX_QUESTION_CHARS
 from ops_agent.jobs import _deny_all_approver as _deny_all_approver
 from ops_agent.jobs import (
+    _payload_event_id,
     _payload_trace_id,
     _request_actor,
     _validate_question_target,
@@ -165,12 +166,23 @@ class _Handler(BaseHTTPRequestHandler):
             if question is None:
                 self._send(400, {"error": "缺 question(非空字符串)"})
                 return
-            job = jq.submit(question, target, trace_id=trace_id, actor=actor)
+            event_id = _payload_event_id(payload, self.headers.get("X-Ops-Event-Id"))
+            if event_id is None:
+                event_id = _payload_event_id(payload, self.headers.get("Idempotency-Key"))
+            job = jq.submit(question, target, trace_id=trace_id, actor=actor, event_id=event_id)
             if job is None:
                 METRICS.inc("webhook_queue_full_total")
                 self._send(429, {"error": "queue_full", "detail": "稍后重试", "trace_id": trace_id})
                 return
-            self._send(202, {"job_id": job.id, "trace_id": job.trace_id, "status": job.status})
+            self._send(
+                202,
+                {
+                    "job_id": job.id,
+                    "trace_id": job.trace_id,
+                    "event_id": job.event_id,
+                    "status": job.status,
+                },
+            )
             return
         # 同步模式(默认):内联跑完返回(向后兼容)。
         # P2-7 并发闸:每个请求占一个 HTTP 线程内联跑多步 LLM(10-60s),无闸时并发告警风暴

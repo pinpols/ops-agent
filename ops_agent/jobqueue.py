@@ -30,6 +30,15 @@ SUCCEEDED = "succeeded"
 FAILED = "failed"
 
 
+def _normalize_event_id(event_id: str | None) -> str | None:
+    if not isinstance(event_id, str):
+        return None
+    value = event_id.strip()
+    if not value:
+        return None
+    return value[:256]
+
+
 @dataclass
 class DiagnosisJob:
     id: str
@@ -37,6 +46,7 @@ class DiagnosisJob:
     trace_id: str
     target: str | None = None
     actor: str | None = None
+    event_id: str | None = None
     status: str = QUEUED
     result: dict | None = None
     error: str | None = None
@@ -45,16 +55,26 @@ class DiagnosisJob:
 
     def to_public(self) -> dict[str, Any]:
         """对外 JSON(查询端点用)。"""
+        error = self.error
+        if error:
+            try:
+                from ops_agent.config import get_settings
+
+                if get_settings().production:
+                    error = error.split(":", 1)[0] + ": job_failed"
+            except Exception:  # noqa: BLE001 - 响应序列化不能因配置读取失败而崩
+                error = "job_failed"
         return {
             "job_id": self.id,
             "trace_id": self.trace_id,
             "status": self.status,
             "target": self.target,
             "actor": self.actor,
+            "event_id": self.event_id,
             "created_at": self.created_at,
             "attempts": self.attempts,
             "result": self.result,
-            "error": self.error,
+            "error": error,
         }
 
 
@@ -99,14 +119,23 @@ class JobQueue:
         target: str | None = None,
         trace_id: str | None = None,
         actor: str | None = None,
+        event_id: str | None = None,
     ) -> DiagnosisJob | None:
         """入队一个诊断任务。队列满 → 返回 None(背压,上游应回 429)。"""
+        event_id = _normalize_event_id(event_id)
+        if event_id:
+            with self._lock:
+                existing = self._find_event_locked(event_id)
+                if existing is not None:
+                    METRICS.inc("jobs_deduplicated_total", backend="memory")
+                    return existing
         job = DiagnosisJob(
             id=uuid.uuid4().hex,
             question=question,
             target=target,
             trace_id=trace_id or uuid.uuid4().hex,
             actor=actor,
+            event_id=event_id,
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -123,6 +152,12 @@ class JobQueue:
         self.update_queue_metrics()
         return job
 
+    def _find_event_locked(self, event_id: str) -> DiagnosisJob | None:
+        for job in self._jobs.values():
+            if job.event_id == event_id:
+                return job
+        return None
+
     def get(self, job_id: str) -> DiagnosisJob | None:
         with self._lock:
             return self._jobs.get(job_id)
@@ -136,6 +171,7 @@ class JobQueue:
         with self._lock:
             backlog = len(self._timers)  # 挂起的重试 Timer = 内存后端的重试积压
         METRICS.set("retry_backlog", backlog, backend="memory")
+        METRICS.set("queue_backlog_total", depth + backlog, backend="memory")
         if self._queue_depth_alert_threshold > 0:
             METRICS.set("queue_depth_alert_threshold", self._queue_depth_alert_threshold)
             METRICS.set(

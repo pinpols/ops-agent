@@ -9,6 +9,7 @@ import logging
 import signal
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,41 @@ logger = logging.getLogger("ops_agent.worker")
 
 _BACKOFF_BASE_SECONDS = 0.5
 _BACKOFF_MAX_SECONDS = 30.0
+
+
+class _WorkerMetricsHandler(BaseHTTPRequestHandler):
+    server_version = "ops-agent-worker"
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        logger.info("%s - %s", self.address_string(), fmt % args)
+
+    def do_GET(self) -> None:
+        if self.path == "/healthz":
+            self._send(200, "ok\n", "text/plain")
+            return
+        if self.path == "/metrics":
+            self._send(200, METRICS.render(), "text/plain; version=0.0.4")
+            return
+        self._send(404, "not_found\n", "text/plain")
+
+    def _send(self, status: int, body: str, content_type: str) -> None:
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+def _start_worker_metrics_server(port: int) -> ThreadingHTTPServer | None:
+    if port <= 0:
+        return None
+    # Container scrape endpoint; NetworkPolicy/Service controls exposure.
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), _WorkerMetricsHandler)  # nosec B104
+    thread = threading.Thread(target=httpd.serve_forever, name="worker-metrics", daemon=True)
+    thread.start()
+    logger.info("worker metrics on :%d", port)
+    return httpd
 
 
 def build_redis_queue(settings: Settings) -> RedisQueue:
@@ -54,7 +90,8 @@ def process_once(rq: WorkerQueue, handler: Any, timeout: int = 1) -> str | None:
             # 任务已被另一方(reaper/重复副本)写成终态 → 本方结果作废,不发 succeeded(P1-3)
             logger.warning("job %s trace_id=%s 完成时已被判终态,结果丢弃", job_id, job.trace_id)
             return "superseded"
-        _notify_succeeded(job, result)
+        if not hasattr(rq, "deliver_due_callbacks"):
+            _notify_succeeded(job, result)
         return "succeeded"
     except Exception as exc:  # noqa: BLE001 - worker 边界:失败转重试/DLQ,不崩线程
         # P2-4:确定性失败(预算耗尽/max_steps 绕圈)重试注定同样结局,直接判 dead 进 DLQ
@@ -173,11 +210,29 @@ def _reaper_loop(
         stop.wait(interval)
 
 
+def _callback_loop(rq: Any, stop: threading.Event, interval: float) -> None:
+    """可靠回调 outbox 投递循环。RedisQueue 支持;其他后端无该方法则 no-op。"""
+    deliver = getattr(rq, "deliver_due_callbacks", None)
+    if deliver is None:
+        return
+    failures = 0
+    while not stop.is_set():
+        try:
+            deliver(limit=25)
+            failures = 0
+        except Exception:  # noqa: BLE001 - 回调投递异常不终结 worker
+            failures += 1
+            if failures <= 3 or failures % 10 == 0:
+                logger.exception("callback outbox 循环异常(连续 %d 次)", failures)
+        stop.wait(interval)
+
+
 def run(settings: Settings | None = None) -> None:
     """启动 worker:N 个消费线程 + reaper + 信号优雅停机(阻塞直到收到停止信号)。"""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = settings or get_settings()
     rq = build_redis_queue(settings)
+    metrics_httpd = _start_worker_metrics_server(settings.ops_worker_metrics_port)
     # 复用诊断任务内核(注入全拒审批闸 + 回调)。直接 import jobs,解掉 worker→server 反向依赖。
     from ops_agent.jobs import diagnosis_job_handler
 
@@ -208,6 +263,9 @@ def run(settings: Settings | None = None) -> None:
     threads.append(
         threading.Thread(target=_heartbeat_loop, args=(rq, stop, hb_interval), name="heartbeat")
     )
+    threads.append(
+        threading.Thread(target=_callback_loop, args=(rq, stop, 1.0), name="callback-outbox")
+    )
     for t in threads:
         t.start()
     logger.info("worker 启动:threads=%d queue=%s", len(threads), settings.ops_queue_key)
@@ -224,6 +282,9 @@ def run(settings: Settings | None = None) -> None:
         deadline = time.monotonic() + settings.ops_max_run_seconds + 10
         for t in threads:
             t.join(timeout=max(0.1, deadline - time.monotonic()))
+        if metrics_httpd is not None:
+            metrics_httpd.shutdown()
+            metrics_httpd.server_close()
         rq.close()
         logger.info("worker 优雅退出")
 

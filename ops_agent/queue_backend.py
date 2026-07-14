@@ -16,7 +16,12 @@ class IngressQueue(Protocol):
     """入口契约:serve 对 job_queue 只依赖这几个方法。"""
 
     def submit(
-        self, question: str, target: str | None = None, trace_id: str | None = None
+        self,
+        question: str,
+        target: str | None = None,
+        trace_id: str | None = None,
+        actor: str | None = None,
+        event_id: str | None = None,
     ) -> DiagnosisJob | None: ...
 
     def get(self, job_id: str) -> DiagnosisJob | None: ...

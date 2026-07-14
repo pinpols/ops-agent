@@ -16,10 +16,12 @@ import urllib.request
 
 from ops_agent.config import get_settings
 from ops_agent.exec_tools import exec_gate
+from ops_agent.http_limits import read_limited_text
 from ops_agent.targets import resolve_target
 from ops_agent.tool_result import ToolResult
 
 _JOBID_RE = re.compile(r"^[0-9a-f]{32}$")  # Flink jobid = 32 位 hex
+_RESPONSE_CAP_BYTES = 50_000
 _TIMEOUT_S = 30
 
 
@@ -45,11 +47,14 @@ def _flink_write(
     )
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:  # noqa: S310  # nosec B310
-            out = resp.read().decode("utf-8", errors="replace")
+            out, truncated, _observed = read_limited_text(resp, max_bytes=_RESPONSE_CAP_BYTES)
     except (urllib.error.URLError, TimeoutError) as e:
         return ToolResult.failure(f"[{tool}] 执行失败:{e}", jobid=jobid)
     return ToolResult.success(
-        f"[{tool}] 已执行 {method} {url}\n{out[:500]}", jobid=jobid, executed=True
+        f"[{tool}] 已执行 {method} {url}\n{out[:500]}",
+        jobid=jobid,
+        executed=True,
+        truncated=truncated,
     )
 
 

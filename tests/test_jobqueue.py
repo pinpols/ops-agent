@@ -33,6 +33,16 @@ class JobQueueTest(unittest.TestCase):
         finally:
             jq.shutdown()
 
+    def test_submit_deduplicates_event_id(self):
+        jq = JobQueue(lambda job: {"echo": job.question}, workers=1)
+        try:
+            first = jq.submit("hello", event_id="alert/abc")
+            second = jq.submit("hello again", event_id="alert/abc")
+            self.assertIsNotNone(first)
+            self.assertIs(first, second)
+        finally:
+            jq.shutdown()
+
     def test_handler_exception_marks_failed(self):
         def boom(job):
             raise RuntimeError("nope")

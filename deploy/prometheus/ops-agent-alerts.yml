@@ -101,7 +101,7 @@ groups:
           severity: critical
         annotations:
           summary: "ops-agent 队列有积压但 10m 零产出(疑似 worker 停摆)"
-          description: "queue_depth>0 却既无成功也无失败。检查 serve-worker 进程是否存活 / Redis 连接 / BRPOP 阻塞。"
+          description: "queue_depth>0 却既无成功也无失败。检查 serve-worker 进程是否存活 / Redis 连接 / BLMOVE 阻塞。"
 
       # ── 处理耗时(histogram)─────────────────────────────────
       - alert: OpsAgentJobP95Slow

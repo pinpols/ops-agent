@@ -8,6 +8,7 @@ import re
 import urllib.error
 import urllib.request
 
+from ops_agent.http_limits import read_limited_text
 from ops_agent.tool_result import ToolResult
 
 DEFAULT_CAP = 12000  # 响应字符上限,防大 JSON 撑爆上下文
@@ -50,8 +51,7 @@ def readonly_rest_get(
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310  # nosec B310
-            raw = resp.read().decode("utf-8", errors="replace")
+            raw, truncated, observed = read_limited_text(resp, max_bytes=cap)
     except (urllib.error.URLError, TimeoutError) as e:
         return ToolResult.failure(f"[{tool}] 请求失败:{e}", path=path)
-    truncated = len(raw) > cap
-    return ToolResult.success(raw[:cap], path=path, bytes=len(raw), truncated=truncated)
+    return ToolResult.success(raw, path=path, bytes=observed, truncated=truncated)

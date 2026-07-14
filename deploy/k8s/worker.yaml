@@ -19,6 +19,10 @@ spec:
       labels:
         app: ops-agent
         component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "9091"
     spec:
       # 滚动更新时给在途任务排空时间:worker 收 SIGTERM 后 stop+join,排空窗口 =
       # OPS_MAX_RUN_SECONDS(默认 120s)+ 收尾余量。grace period 必须 ≥ 该窗口,
@@ -45,6 +49,10 @@ spec:
                   fieldPath: metadata.name
             - name: OPS_APPROVAL_LOG
               value: "/var/lib/ops-agent/audit/$(POD_NAME)-approvals.jsonl"
+          ports:
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
           # liveness:心跳文件 mtime 新鲜度。主循环每秒 touch;>30s 未更新视为僵死 → 重启。
           # 比"进程在不在"更强:能检出主循环卡死/死锁(容器仍 Running 但不工作)。
           livenessProbe:
@@ -81,20 +89,8 @@ spec:
             - name: audit
               mountPath: /var/lib/ops-agent/audit
       volumes:
-        # runtime 卷承载 OPS_METRICS_FILE(/var/run/ops-agent/metrics.prom)与心跳文件。
-        # ⚠️ P1-4②:emptyDir 里的 metrics textfile **没有任何抓取方**,指标写了等于没写。
-        # 两种接法(详见 deploy/k8s/README.md「worker 指标抓取」):
-        #   A. node_exporter textfile collector:把 runtime 换成 hostPath,指向
-        #      node_exporter --collector.textfile.directory 目录,例如:
-        #        - name: runtime
-        #          hostPath:
-        #            path: /var/lib/node_exporter/textfile/ops-agent
-        #            type: DirectoryOrCreate
-        #      (需允许 hostPath 的 PodSecurity/OPA 白名单;多 worker 同节点会互相覆盖,
-        #       建议 OPS_METRICS_FILE 带 $(POD_NAME) 前缀区分)
-        #   B. sidecar exporter:同 Pod 加一个只读挂 runtime 的 nginx/exporter 容器,
-        #      以 HTTP 暴露 metrics.prom,配 prometheus.io/scrape 注解。
-        # 默认保持 emptyDir(可移植、无节点权限要求),接法由部署方按集群策略二选一。
+        # runtime 卷承载 OPS_METRICS_FILE 与心跳文件。worker 默认也在 9091 暴露 /metrics,
+        # textfile 仅作为本地落盘/排障副本;不再依赖 sidecar 或 hostPath 才能被抓取。
         - name: runtime
           emptyDir: {}
         - name: state

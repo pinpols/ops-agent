@@ -9,11 +9,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from ops_agent.http_limits import read_limited_text
 from ops_agent.targets import resolve_target
 from ops_agent.tool_result import ToolResult
 
 _QUERY_PATH = "/api/v1/query"
 _RESULT_CAP = 50  # 防一条 PromQL 拉回上万 series 撑爆上下文
+_RESPONSE_CAP_BYTES = 2_000_000
 _TIMEOUT_S = 10
 
 
@@ -38,7 +40,10 @@ def query_metrics_result(promql: str, target: str | None = None) -> ToolResult:
     )
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:  # noqa: S310  # nosec B310
-            payload = json.loads(resp.read().decode("utf-8"))
+            raw, truncated, _observed = read_limited_text(resp, max_bytes=_RESPONSE_CAP_BYTES)
+            if truncated:
+                return ToolResult.failure("[query_metrics] 响应过大,已拒绝解析")
+            payload = json.loads(raw)
     except (urllib.error.URLError, TimeoutError) as e:
         return ToolResult.failure(f"[query_metrics] 请求失败:{e}")
     except json.JSONDecodeError as e:

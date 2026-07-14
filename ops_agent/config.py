@@ -110,6 +110,8 @@ class Settings:
     ops_worker_dead_after_seconds: float = 300.0  # from_env 派生 max_run+llm_timeout+60
     ops_stale_running_seconds: float = 360.0  # from_env 派生 max_run+llm_timeout+120
     ops_reaper_interval_seconds: float = 30.0
+    # 独立 worker HTTP 指标端口。0=关闭;K8s 默认打开,本地不强占端口。
+    ops_worker_metrics_port: int = 0
 
     @property
     def langfuse_enabled(self) -> bool:
@@ -244,6 +246,7 @@ class Settings:
                 )
             ),
             ops_reaper_interval_seconds=float(os.environ.get("OPS_REAPER_INTERVAL_SECONDS", "30")),
+            ops_worker_metrics_port=int(os.environ.get("OPS_WORKER_METRICS_PORT", "0")),
         )
 
 

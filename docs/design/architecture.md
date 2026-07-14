@@ -47,7 +47,7 @@
                                    202 {job_id, trace_id}        ← 秒级 ack,不阻塞告警源
                                      │
                               Redis 队列(LIST + HASH + DLQ + retry zset)
-                                     │  BRPOP
+                                     │  BLMOVE
                                      ▼
                           serve-worker(独立进程,可水平扩展)
                                      │  注入 deny-all 审批闸

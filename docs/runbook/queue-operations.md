@@ -16,7 +16,9 @@
 | 指标 | 类型 | 含义 | 来源进程 |
 |---|---|---|---|
 | `queue_depth{backend}` | gauge | 主队列待处理数 | ingress + worker |
+| `queue_backlog_total{backend}` | gauge | 主队列 + retry + processing + DLQ 的全局积压 | ingress + worker |
 | `retry_backlog{backend}` | gauge | 退避重试中的任务数(delayed zset) | worker |
+| `processing_backlog{backend}` | gauge | worker processing list 中的在途任务数 | worker |
 | `dlq_size{backend}` | gauge | 死信堆积数 | worker |
 | `workers_total{backend="redis"}` | gauge | worker 消费线程总数(利用率分母) | worker |
 | `workers_busy{backend="redis"}` | gauge | 在途处理中的 worker 数(利用率分子) | worker |
@@ -26,10 +28,12 @@
 | `jobs_succeeded_total` / `jobs_failed_total` | counter | 终态计数 | worker |
 | `jobs_retried_total` | counter | 重试次数 | worker |
 | `jobs_lost_total` | counter | 出队但状态缺失(丢单) | worker |
+| `jobs_deduplicated_total` | counter | 按 event_id/idempotency_key 去重的重复事件数 | ingress |
+| `callbacks_succeeded_total` / `callbacks_retried_total` / `callbacks_failed_total` | counter | callback outbox 投递结果 | worker |
 
 > **worker 利用率** = `workers_busy / workers_total`。持续 ≈1 且 `queue_depth` 上升 = 该扩容。
-> **抓取**:ingress 指标走 `serve` 的 `/metrics`;worker 指标用 `METRICS.write_textfile` 落到
-> node_exporter textfile collector 目录(worker 无 HTTP 端点)。
+> **抓取**:ingress 指标走 `serve` 的 `/metrics`;worker 默认通过
+> `OPS_WORKER_METRICS_PORT=9091` 暴露 `/metrics`;`OPS_METRICS_FILE` 是本地 textfile 副本。
 
 ---
 
@@ -51,7 +55,8 @@
      ```bash
      OPS_WORKER_COUNT=8 ops-agent serve-worker      # 单进程内 8 个消费线程
      ```
-   - worker 水平扩展安全:状态在 Redis,`BRPOP` 保证一个任务只被一个 worker 取到。
+   - worker 水平扩展安全:状态在 Redis,`BLMOVE` 原子搬运到 per-worker processing list,
+     worker 崩溃后由 reaper 回收。
 
 3. **临时泄压**:上游限流 / 调大 `OPS_QUEUE_MAX`(只是把背压点后移,不解决根因)。
 
@@ -102,7 +107,7 @@
 **症状**:`OpsAgentDiagnoseStalled`(`queue_depth>0` 但成功/失败速率都为 0)。
 
 1. **worker 进程是否存活**:`ps aux | grep serve-worker`。崩了就拉起(k8s 会自动重启,见 `deploy/k8s/`)。
-2. **Redis 连通性**:worker 连不上 Redis 时 `BRPOP` 会异常,`_worker_loop` 吞掉异常继续循环(不崩),但不消费。查 worker 日志 `worker 循环异常`。
+2. **Redis 连通性**:worker 连不上 Redis 时 `BLMOVE` 会异常,`_worker_loop` 吞掉异常继续循环(不崩),但不消费。查 worker 日志 `worker 循环异常`。
 3. **优雅停机卡住**:`serve-worker` 收 SIGTERM 后等在途任务 join(上限 10s)。滚动更新时短暂停摆正常。
 4. 确认 worker 起来后,`workers_total` 应回到配置值,`workers_busy` 开始波动。
 
@@ -111,7 +116,7 @@
 ## §扩 worker(容量规划)
 
 - 单进程并发 = `OPS_WORKER_COUNT`(消费线程数)。CPU 不是瓶颈(大头是等 LLM I/O),可适当高于核数。
-- 跨进程/跨节点:多起 `serve-worker`,无需协调(Redis `BRPOP` 天然分发)。
+- 跨进程/跨节点:多起 `serve-worker`,无需协调(Redis `BLMOVE` 原子分发并登记 processing list)。
 - 粗算目标 worker 数 ≈ `入队速率(/s) × 单任务 P50 耗时(s)`,再留 1.5~2x 余量给洪峰。
 - k8s 下用 HPA 按 `queue_depth` 或 CPU 扩(见 `deploy/k8s/worker-deployment.yaml`)。
 

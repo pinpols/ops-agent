@@ -25,7 +25,13 @@ def _rq(max_queue: int = 100, max_retries: int = 2) -> RedisQueue:
 class RedisQueueTest(unittest.TestCase):
     def test_submit_stores_and_enqueues(self):
         rq = _rq()
-        job = rq.submit("why slow", target="fbs", trace_id="trace-redis", actor="alice")
+        job = rq.submit(
+            "why slow",
+            target="fbs",
+            trace_id="trace-redis",
+            actor="alice",
+            event_id="alert/redis-1",
+        )
         self.assertIsNotNone(job)
         self.assertEqual(rq.qsize(), 1)
         loaded = rq.get(job.id)
@@ -33,7 +39,27 @@ class RedisQueueTest(unittest.TestCase):
         self.assertEqual(loaded.trace_id, "trace-redis")
         self.assertEqual(loaded.target, "fbs")
         self.assertEqual(loaded.actor, "alice")
+        self.assertEqual(loaded.event_id, "alert/redis-1")
         self.assertEqual(loaded.status, QUEUED)
+
+    def test_submit_deduplicates_event_id(self):
+        rq = _rq()
+        first = rq.submit("why slow", event_id="alert/redis-dup")
+        second = rq.submit("why slow again", event_id="alert/redis-dup")
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(rq.qsize(), 1)
+
+    def test_backpressure_counts_retry_backlog(self):
+        rq = _rq(max_queue=1, max_retries=1)
+        job = rq.submit("q")
+        self.assertIsNotNone(job)
+        rq.consume(timeout=1)
+        self.assertEqual(rq.fail_or_retry(job.id, "boom"), "retried")
+        self.assertEqual(rq.qsize(), 0)
+        self.assertEqual(rq.retry_size(), 1)
+        self.assertIsNone(rq.submit("new"))  # retry backlog 已占满全局容量
 
     def test_backpressure_returns_none_when_full(self):
         rq = _rq(max_queue=1)
@@ -147,6 +173,7 @@ class RedisQueueTest(unittest.TestCase):
         text = METRICS.render()
         self.assertIn("# TYPE ops_agent_dlq_size gauge", text)
         self.assertIn("# TYPE ops_agent_retry_backlog gauge", text)
+        self.assertIn("# TYPE ops_agent_queue_backlog_total gauge", text)
         self.assertIn('ops_agent_dlq_size{backend="redis"} 1.0', text)
 
 
@@ -590,6 +617,22 @@ class TerminalCallbackTest(unittest.TestCase):
             self.assertEqual(called_job.attempts, 2)  # payload 带最终 attempts
             self.assertEqual(cb.call_args.kwargs["status"], "failed")
 
+    def test_callback_outbox_retries_failed_delivery(self):
+        rq = _rq()
+        job = rq.submit("q")
+        rq.consume(timeout=1)
+        rq.mark_running(job.id)
+        with patch("ops_agent.callback._post_callback", return_value=False) as cb:
+            self.assertTrue(rq.complete(job.id, {"ok": True}))
+        self.assertEqual(cb.call_count, 1)
+        self.assertEqual(rq._r.llen(rq._callback_outbox_key), 0)
+        self.assertEqual(rq._r.zcard(rq._callback_retry_key), 1)
+
+        with patch("ops_agent.callback._post_callback", return_value=True) as cb:
+            stats = rq.deliver_due_callbacks(limit=5, now=time.time() + 3600)
+        self.assertEqual(stats["sent"], 1)
+        self.assertEqual(cb.call_args.kwargs["status"], "succeeded")
+
     def test_handler_no_longer_posts_failed_callback_midway(self):
         # jobs.diagnosis_job_handler 不再在每次异常时回调;终局投递收口在队列层
         from ops_agent.jobs import diagnosis_job_handler
@@ -856,6 +899,25 @@ class MetricsFlushTest(unittest.TestCase):
     def test_flush_metrics_file_tolerates_write_errors(self):
         # 只读路径 → 不抛,不崩循环
         worker_main._flush_metrics_file(Path("/proc/definitely/not/writable/x.prom"))
+
+    def test_worker_metrics_http_server_exposes_metrics(self):
+        import socket
+        import urllib.request
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        httpd = worker_main._start_worker_metrics_server(port)
+        self.assertIsNotNone(httpd)
+        assert httpd is not None
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as resp:
+                body = resp.read().decode()
+            self.assertEqual(resp.status, 200)
+            self.assertIn("ops_agent", body)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
     def test_reap_one_records_lost_outcome_from_fail_or_retry(self):
         # P1-4③:fail_or_retry 返回 lost(hash 在 _load 与 fail_or_retry 之间蒸发)时

@@ -21,6 +21,7 @@ data:
   OPS_JOB_TTL_SECONDS: "86400"
   OPS_QUEUE_DEPTH_ALERT_THRESHOLD: "200"
   OPS_METRICS_FILE: "/var/run/ops-agent/metrics.prom"
+  OPS_WORKER_METRICS_PORT: "9091"
   OPS_WORKER_HEARTBEAT_FILE: "/var/run/ops-agent/worker.hb"
   # 每个 pod 用独立审计文件写入持久卷;见 ingress/worker 中基于 POD_NAME 的覆盖 env。
   OPS_APPROVAL_LOG: "/var/lib/ops-agent/audit/approvals.jsonl"

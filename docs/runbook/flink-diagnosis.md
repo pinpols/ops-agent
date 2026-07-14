@@ -1,7 +1,11 @@
 # Runbook：Flink 流作业只读诊断
 
-ops-agent 以 **只读** 方式接入 Flink:`query_flink_rest`(GET-only REST)+ `query_metrics`(Prometheus)。
-**绝不**做 cancel/stop、trigger savepoint、改并行度、删 state —— 这些是写操作,必须走 HITL/审批路径,本工具链永不涉及(只读 T1 边界)。
+ops-agent 默认以 **只读** 方式接入 Flink:`query_flink_rest`(GET-only REST)+
+`query_metrics`(Prometheus)。自动 webhook/worker 诊断路径注入 deny-all 审批闸,不会执行
+cancel/stop、trigger savepoint、改并行度、删 state。
+
+危险写工具 `flink_cancel_job` / `flink_trigger_savepoint` 已单独隔离,只能在交互式审批通过且
+`OPS_ALLOW_EXEC=true`(prod 还需 `OPS_PROD_ALLOW_EXEC=true`)时执行;网络 webhook 路径不可达。
 
 配置:`OPS_FLINK_URL=http://jobmanager:8081`(或 `targets.toml` 的 `flink_url`)+ Flink 的 Prometheus 指标已被抓取。
 
