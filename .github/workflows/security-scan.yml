@@ -1,9 +1,16 @@
 name: Security Scan
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
-    paths: ["ops_agent/**", "evals/**", "pyproject.toml", "requirements.lock", "uv.lock"]
+    paths:
+      - ".github/workflows/security-scan.yml"
+      - "ops_agent/**"
+      - "evals/**"
+      - "pyproject.toml"
+      - "requirements.lock"
+      - "uv.lock"
   pull_request:
     branches: [main]
   schedule:
