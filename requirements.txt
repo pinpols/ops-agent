@@ -8,7 +8,7 @@ charset-normalizer==3.4.7
 click==8.1.7
 distro==1.9.0
 idna==3.18
-pydantic==2.9.2
+pydantic==2.13.5
 pydantic-core==2.47.0
 python-dotenv==1.0.1
 pyyaml==6.0.2
