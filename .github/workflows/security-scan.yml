@@ -32,7 +32,7 @@ jobs:
           cache: pip
       - run: pip install bandit[toml]
       - run: bandit -r ops_agent evals -f json -o bandit-report.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: bandit-report
@@ -47,7 +47,7 @@ jobs:
           pip install semgrep
           semgrep --config=p/python --config=p/security-audit \
             ops_agent evals --json -o semgrep-report.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: semgrep-report
