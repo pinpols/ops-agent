@@ -29,7 +29,7 @@ langfuse 的包装版(**一行 import 改动**):
 ```python
 # ops_agent/diagnose.py / agent.py 里:
 # from anthropic import Anthropic
-from langfuse.anthropic import Anthropic     # ← 自动捕获每次调用的 token 数 + 按模型价算成本
+from langfuse.anthropic import Anthropic  # ← 自动捕获每次调用的 token 数 + 按模型价算成本
 ```
 
 换完,trace 里每次 LLM 调用就带 input/output token + 估算 $。**多步 agent 很烧 token,这是优化的依据**
