@@ -13,7 +13,7 @@ requires-python = ">=3.11"
 # floor 太低(原 >=0.40)会让未来某天 `pip install` 拉到不兼容版本而静默打断 messages.create。
 # 精确复现见 requirements.lock。
 dependencies = [
-    "anthropic>=0.69,<1",
+    "anthropic>=0.69,<2",
     "pydantic>=2.9",
     "python-dotenv>=1.0",
     "psycopg[binary]>=3.2",
